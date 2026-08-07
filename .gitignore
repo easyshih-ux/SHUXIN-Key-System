@@ -1,0 +1,18 @@
+node_modules/
+dist/
+tmp/
+
+*.log
+*.tsbuildinfo
+
+vite.config.js
+vite.config.d.ts
+
+.env
+.env.*
+!.env.example
+
+/shuxin-*.png
+
+# GitHub rejects individual files larger than 100 MB; keep this source PDF locally.
+/data/書馨跑關海報(印).pdf
