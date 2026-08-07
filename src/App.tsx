@@ -363,7 +363,7 @@ export default function App() {
       return <div className="chapter-lightbox" role="dialog" aria-modal="true" aria-label={`${chapter.id} ${chapter.keyword} 題目`} onMouseDown={(event) => event.target === event.currentTarget && setChapterPreviewId(null)}>
         <section>
           <header><strong>{chapter.id.toUpperCase()}｜{chapter.keyword}</strong><button onClick={() => setChapterPreviewId(null)} aria-label="關閉題目">關閉</button></header>
-          <img src={`/assets/chapters/chapter-${String(chapter.number).padStart(2, '0')}.png`} alt={`${chapter.id} ${chapter.keyword} 完整題目`} />
+          <img src={`${import.meta.env.BASE_URL}assets/chapters/chapter-${String(chapter.number).padStart(2, '0')}.png`} alt={`${chapter.id} ${chapter.keyword} 完整題目`} />
         </section>
       </div>
     })()}
