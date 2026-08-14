@@ -36,7 +36,7 @@ export const ANNUAL_BANKS_STORAGE_KEY = 'shuxin-annual-banks-v1'
 const IMAGE_DB_NAME = 'shuxin-annual-bank-images-v1'
 const IMAGE_STORE = 'images'
 export const BUILTIN_BANK_ID = 'builtin-115'
-export const CHAPTER_ASSET_VERSION = '20260814-3'
+export const CHAPTER_ASSET_VERSION = '20260814-4'
 
 export function createBuiltinBank(chapters: Chapter[], accepted: Partial<Record<ChapterId, string[]>> = {}): AnnualBank {
   return {
@@ -45,14 +45,21 @@ export function createBuiltinBank(chapters: Chapter[], accepted: Partial<Record<
     name: 'SHUXIN 初始年度題庫',
     createdAt: new Date().toISOString(),
     source: 'builtin',
-    chapters: chapters.map((chapter) => ({ ...chapter, acceptedAnswers: accepted[chapter.id] ?? [], imageFile: `chapter-${String(chapter.number).padStart(2, '0')}.png` })),
+    chapters: chapters.map((chapter) => ({ ...chapter, acceptedAnswers: accepted[chapter.id] ?? [], imageFile: `chapter-${String(chapter.number).padStart(2, '0')}.webp` })),
   }
 }
 
 export function loadBankStore(initialBank: AnnualBank): BankStore {
   try {
     const parsed = JSON.parse(localStorage.getItem(ANNUAL_BANKS_STORAGE_KEY) ?? '') as BankStore
-    if (parsed?.version === 1 && parsed.banks?.length && parsed.banks.some((bank) => bank.id === parsed.activeBankId)) return parsed
+    if (parsed?.version === 1 && parsed.banks?.length && parsed.banks.some((bank) => bank.id === parsed.activeBankId)) {
+      const banks = parsed.banks.map((bank) => bank.id === BUILTIN_BANK_ID
+        ? { ...bank, chapters: bank.chapters.map((chapter) => ({ ...chapter, imageFile: `chapter-${String(chapter.number).padStart(2, '0')}.webp` })) }
+        : bank)
+      const migrated = { ...parsed, banks }
+      saveBankStore(migrated)
+      return migrated
+    }
   } catch { /* use initial bank */ }
   const store: BankStore = { version: 1, activeBankId: initialBank.id, previousActiveBankId: null, banks: [initialBank] }
   saveBankStore(store)
