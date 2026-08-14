@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { chapters } from './data/chapters'
+import { chapters as defaultChapters } from './data/chapters'
 import { routes } from './data/routes'
 import { abilityByChapter } from './data/abilities'
 import type { Chapter, ChapterId, Route } from './data/types'
@@ -11,6 +11,8 @@ import { audioManager } from './lib/audioManager'
 import { FinalRevealOverlay } from './components/FinalRevealOverlay'
 import { CapabilityDirections } from './components/CapabilityDirections'
 import { AbilitiesOverview } from './components/AbilitiesOverview'
+import { clearTestStorage, loadTestProgress, loadTestSession, saveTestProgress, saveTestSession, type TestScenario, type TestSession } from './lib/testMode'
+import { activeBank, createBuiltinBank, deleteImportedImages, loadBankStore, prepareAnnualBankZip, resolveBankImageUrl, saveBankStore, saveImportedImages, type PreparedAnnualBank } from './lib/annualBanks'
 
 type DialogStep = 'librarian' | 'ability'
 type ResultKind = 'first' | 'duplicate' | 'off-route' | 'wrong' | 'no-group'
@@ -19,8 +21,23 @@ type MainView = 'wall' | 'collective' | 'directions' | 'abilities'
 
 const normalize = (value: string) => value.normalize('NFKC').trim().toLocaleLowerCase('en-US')
 
+function TestModeChrome({ onTools, onRestore, compact = false }: { onTools: () => void; onRestore: () => void; compact?: boolean }) {
+  return <aside className={`test-mode-chrome${compact ? ' preview-open' : ''}`} aria-label="流程測試模式">
+    <strong>TEST｜測試模式</strong>
+    {!compact && <><span>目前為測試模式，不會修改正式活動進度。</span>
+      <button onClick={onTools}>返回流程測試</button>
+      <button onClick={onRestore}>結束測試並恢復</button></>}
+  </aside>
+}
+
 export default function App() {
-  const [progress, setProgress] = useState<ProgressState>(() => loadProgress(''))
+  const initialTestSession = useRef<TestSession | null>(loadTestSession())
+  const [isTestMode, setIsTestMode] = useState(() => initialTestSession.current !== null)
+  const [testSession, setTestSession] = useState<TestSession | null>(() => initialTestSession.current)
+  const [progress, setProgress] = useState<ProgressState>(() => initialTestSession.current ? (loadTestProgress() ?? initialTestSession.current.backupProgress) : loadProgress(''))
+  const [bankStore, setBankStore] = useState(() => loadBankStore(createBuiltinBank(defaultChapters, progress.acceptedAnswersByChapter)))
+  const bank = activeBank(bankStore)
+  const chapters = bank.chapters
   const [step, setStep] = useState<DialogStep | null>(null)
   const [answer, setAnswer] = useState('')
   const [result, setResult] = useState<Result | null>(null)
@@ -28,6 +45,7 @@ export default function App() {
   const revealTimers = useRef<number[]>([])
   const pendingChapterId = useRef<ChapterId | null>(null)
   const importRef = useRef<HTMLInputElement>(null)
+  const annualImportRef = useRef<HTMLInputElement>(null)
   const [abilityChapterId, setAbilityChapterId] = useState<ChapterId | null>(null)
   const [revealIndex, setRevealIndex] = useState(-1)
   const [revealAnimating, setRevealAnimating] = useState(false)
@@ -38,7 +56,7 @@ export default function App() {
   const [dockCollapsed, setDockCollapsed] = useState(false)
   const [audioEnabled, setAudioEnabled] = useState(() => audioManager.getSettings().enabled)
   const [musicEnabled, setMusicEnabled] = useState(() => audioManager.getMusicSettings().enabled)
-  const [mainView, setMainView] = useState<MainView>('wall')
+  const [mainView, setMainView] = useState<MainView>(() => initialTestSession.current?.currentView ?? 'wall')
   const [revealReady, setRevealReady] = useState(false)
   const [collectiveChapterIds, setCollectiveChapterIds] = useState<ChapterId[]>([])
   const [collectiveChapterId, setCollectiveChapterId] = useState<ChapterId | null>(null)
@@ -46,6 +64,11 @@ export default function App() {
   const [collectiveMessage, setCollectiveMessage] = useState('')
   const [chapterPreviewId, setChapterPreviewId] = useState<ChapterId | null>(null)
   const collectiveInputRef = useRef<HTMLInputElement>(null)
+  const [testUnresolvedCount, setTestUnresolvedCount] = useState<1 | 3 | 5>(3)
+  const [testChapterIds, setTestChapterIds] = useState<ChapterId[]>(['Chapter 18', 'Chapter 19', 'Chapter 20'])
+  const [chapterImageUrls, setChapterImageUrls] = useState<Record<number, string>>({})
+  const [preparedBank, setPreparedBank] = useState<PreparedAnnualBank | null>(null)
+  const [bankError, setBankError] = useState('')
 
   const groupCounts = useMemo(() => Object.fromEntries(chapters.map((chapter) => [chapter.id, (progress.answeredGroupsByChapter[chapter.id] ?? []).length])), [progress.answeredGroupsByChapter])
   const completed = useMemo(() => new Set(chapters.filter((chapter) => hasReachedCollectedLevel(groupCounts[chapter.id])).map((chapter) => chapter.id)), [groupCounts])
@@ -58,7 +81,39 @@ export default function App() {
   const canStartReveal = allCollected || allRoutesExplored
   const revealActionLabel = allCollected ? '開始揭曉' : allRoutesExplored ? '查看未解關卡' : '等待探索完成'
 
-  useEffect(() => saveProgress(progress), [progress])
+  useEffect(() => {
+    if (isTestMode) saveTestProgress(progress)
+    else saveProgress(progress)
+  }, [isTestMode, progress])
+  useEffect(() => {
+    let disposed = false
+    const objectUrls: string[] = []
+    Promise.all(bank.chapters.map(async (chapter) => {
+      const url = await resolveBankImageUrl(bank, chapter.number)
+      if (url.startsWith('blob:')) objectUrls.push(url)
+      return [chapter.number, url] as const
+    })).then((entries) => { if (!disposed) setChapterImageUrls(Object.fromEntries(entries)) })
+    return () => { disposed = true; objectUrls.forEach((url) => URL.revokeObjectURL(url)) }
+  }, [bank])
+  useEffect(() => {
+    if (!isTestMode || !testSession || testSession.currentView === mainView) return
+    const nextSession = { ...testSession, currentView: mainView }
+    setTestSession(nextSession)
+    saveTestSession(nextSession)
+  }, [isTestMode, mainView, testSession])
+  useEffect(() => {
+    if (!initialTestSession.current) return
+    initialTestSession.current = null
+    if (!window.confirm('上次停留在測試模式。按「確定」繼續測試；按「取消」恢復正式進度。')) {
+      const session = loadTestSession()
+      clearTestStorage()
+      setIsTestMode(false)
+      setTestSession(null)
+      setProgress(session?.backupProgress ?? loadProgress(''))
+      setMainView(session?.backupView ?? 'wall')
+      setStep('librarian')
+    }
+  }, [])
   useEffect(() => {
     if (!revealAnimating) return
     const previousOverflow = document.documentElement.style.overflow
@@ -83,6 +138,85 @@ export default function App() {
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
     closeTimer.current = null
     setStep(null)
+  }
+
+  const resolveTestUnsolved = (count: 1 | 3 | 5) => {
+    const selected = testChapterIds.slice(0, count)
+    if (selected.length === count) return selected
+    const defaults = ['Chapter 16', 'Chapter 17', 'Chapter 18', 'Chapter 19', 'Chapter 20'] as ChapterId[]
+    return [...new Set([...selected, ...defaults])].slice(-count)
+  }
+
+  const createScenarioProgress = (scenario: TestScenario, unresolvedIds: ChapterId[]): ProgressState => {
+    const base = createInitialProgress(routes[0]?.id ?? '')
+    const exploredCount = scenario === 'waiting' ? 5 : 7
+    const unsolved = new Set(scenario === 'waiting' ? chapters.slice(12).map((chapter) => chapter.id) : unresolvedIds)
+    const solved = chapters.filter((chapter) => !unsolved.has(chapter.id)).map((chapter) => chapter.id)
+    const attemptedByRoute = Object.fromEntries(routes.slice(0, exploredCount).map((route) => [route.id, [...route.chapters]]))
+    const answeredGroupsByChapter = Object.fromEntries(solved.map((id) => [id, ['flow-test']]))
+    return {
+      ...base,
+      completedChapters: solved,
+      answeredGroupsByChapter,
+      attemptedByRoute,
+      attemptedInputsByRoute: Object.fromEntries(routes.slice(0, exploredCount).map((route) => [route.id, route.chapters.map((id) => `test-${id}`)])),
+      revealState: scenario === 'directions' ? 'revealed' : 'locked',
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  const applyTestScenario = (scenario: TestScenario) => {
+    const count = scenario === 'last' ? 1 : testUnresolvedCount
+    const unresolved = scenario === 'reveal' || scenario === 'directions' ? [] : scenario === 'waiting' ? chapters.slice(12).map((chapter) => chapter.id) : resolveTestUnsolved(count)
+    const nextProgress = createScenarioProgress(scenario, unresolved)
+    const session = testSession ?? {
+      version: 1 as const,
+      backupProgress: progress,
+      backupView: mainView,
+      currentView: scenario === 'directions' ? 'directions' : 'wall',
+      scenario,
+      unresolvedChapterIds: unresolved,
+      startedAt: new Date().toISOString(),
+    }
+    const nextSession = { ...session, scenario, unresolvedChapterIds: unresolved, currentView: scenario === 'directions' ? 'directions' as const : 'wall' as const }
+    setTestSession(nextSession)
+    saveTestSession(nextSession)
+    saveTestProgress(nextProgress)
+    setIsTestMode(true)
+    setProgress(nextProgress)
+    setStep(null)
+    setCollectiveChapterIds([])
+    setCollectiveChapterId(null)
+    setMainView(scenario === 'directions' ? 'directions' : 'wall')
+  }
+
+  const finishTestMode = () => {
+    const backup = testSession?.backupProgress ?? loadTestSession()?.backupProgress ?? loadProgress('')
+    clearRevealTimers()
+    if (closeTimer.current) window.clearTimeout(closeTimer.current)
+    closeTimer.current = null
+    audioManager.finishRevealMusic()
+    audioManager.restoreMusic()
+    clearTestStorage()
+    setIsTestMode(false)
+    setTestSession(null)
+    setProgress(backup)
+    setRevealAnimating(false)
+    setRevealReady(false)
+    setAwakening(null)
+    setResult(null)
+    setChapterPreviewId(null)
+    setMainView(testSession?.backupView ?? 'wall')
+    setStep('librarian')
+  }
+
+  const returnToTestTools = () => {
+    clearRevealTimers()
+    setRevealAnimating(false)
+    setRevealReady(false)
+    audioManager.finishRevealMusic()
+    setMainView('wall')
+    setStep('librarian')
   }
 
   const registerChapter = (chapter: Chapter, route: Route) => {
@@ -143,7 +277,7 @@ export default function App() {
     event.preventDefault()
     audioManager.beginAnswerCheck()
     if (!selectedRoute) { audioManager.restoreMusic(); setResult({ kind: 'no-group' }); return }
-    const chapter = chapters.find((item) => [item.answer, ...(progress.acceptedAnswersByChapter[item.id] ?? [])].some((candidate) => normalize(candidate) === normalize(answer)))
+    const chapter = chapters.find((item) => [item.answer, ...item.acceptedAnswers].some((candidate) => normalize(candidate) === normalize(answer)))
     if (!chapter) {
       recordWrongAttempt(selectedRoute)
       audioManager.play('answerWrong')
@@ -241,7 +375,58 @@ export default function App() {
 
   const setAcceptedAnswers = (chapterId: ChapterId, value: string) => {
     const answers = value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean)
-    setProgress({ ...progress, acceptedAnswersByChapter: { ...progress.acceptedAnswersByChapter, [chapterId]: answers }, updatedAt: new Date().toISOString() })
+    const nextBanks = bankStore.banks.map((item) => item.id === bank.id ? { ...item, chapters: item.chapters.map((chapter) => chapter.id === chapterId ? { ...chapter, acceptedAnswers: answers } : chapter) } : item)
+    const nextStore = { ...bankStore, banks: nextBanks }
+    setBankStore(nextStore)
+    saveBankStore(nextStore)
+  }
+
+  const importAnnualBank = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setBankError('')
+    setPreparedBank(null)
+    try { setPreparedBank(await prepareAnnualBankZip(file, bank)) }
+    catch (error) { setBankError(error instanceof Error ? error.message : '年度包驗證失敗') }
+    event.target.value = ''
+  }
+
+  const activatePreparedBank = async () => {
+    if (!preparedBank) return
+    try {
+      await saveImportedImages(preparedBank.bank.id, preparedBank.images)
+      const banks = [...bankStore.banks.filter((item) => item.id !== preparedBank.bank.id), preparedBank.bank]
+      const nextStore = { ...bankStore, previousActiveBankId: bankStore.activeBankId, activeBankId: preparedBank.bank.id, banks }
+      saveBankStore(nextStore)
+      setBankStore(nextStore)
+      setPreparedBank(null)
+      setBankError('')
+    } catch { setBankError('圖片儲存失敗，年度包未啟用') }
+  }
+
+  const switchAnnualBank = (bankId: string) => {
+    if (bankId === bankStore.activeBankId) return
+    const nextStore = { ...bankStore, previousActiveBankId: bankStore.activeBankId, activeBankId: bankId }
+    saveBankStore(nextStore)
+    setBankStore(nextStore)
+  }
+
+  const restorePreviousBank = () => {
+    const previous = bankStore.previousActiveBankId
+    if (!previous || !bankStore.banks.some((item) => item.id === previous)) return
+    const nextStore = { ...bankStore, activeBankId: previous, previousActiveBankId: bankStore.activeBankId }
+    saveBankStore(nextStore)
+    setBankStore(nextStore)
+  }
+
+  const removeAnnualBank = async (bankId: string) => {
+    const target = bankStore.banks.find((item) => item.id === bankId)
+    if (!target || target.source !== 'imported' || bankId === bankStore.activeBankId) return
+    if (!window.confirm(`確定刪除「${target.academicYear}｜${target.name}」？`)) return
+    await deleteImportedImages(bankId)
+    const nextStore = { ...bankStore, previousActiveBankId: bankStore.previousActiveBankId === bankId ? null : bankStore.previousActiveBankId, banks: bankStore.banks.filter((item) => item.id !== bankId) }
+    saveBankStore(nextStore)
+    setBankStore(nextStore)
   }
 
   const clearRevealTimers = () => {
@@ -305,7 +490,7 @@ export default function App() {
     event.preventDefault()
     const chapter = chapters.find((item) => item.id === collectiveChapterId)
     if (!chapter || awakening) return
-    const correct = [chapter.answer, ...(progress.acceptedAnswersByChapter[chapter.id] ?? [])].some((candidate) => normalize(candidate) === normalize(collectiveAnswer))
+    const correct = [chapter.answer, ...chapter.acceptedAnswers].some((candidate) => normalize(candidate) === normalize(collectiveAnswer))
     if (!correct) {
       audioManager.play('answerWrong')
       setCollectiveMessage('謎底尚未產生共鳴，請再次確認')
@@ -333,10 +518,10 @@ export default function App() {
     setAbilityChapterId(chapterId); setStep('ability')
   }
 
-  if (mainView === 'directions') return <CapabilityDirections onFinish={() => setMainView('abilities')} />
-  if (mainView === 'abilities') return <AbilitiesOverview onBack={() => setMainView('wall')} />
+  if (mainView === 'directions') return <><CapabilityDirections onFinish={() => setMainView('abilities')} />{isTestMode && <TestModeChrome onTools={returnToTestTools} onRestore={finishTestMode} />}</>
+  if (mainView === 'abilities') return <><AbilitiesOverview onBack={() => setMainView('wall')} />{isTestMode && <TestModeChrome onTools={returnToTestTools} onRestore={finishTestMode} />}</>
 
-  if (mainView === 'collective') return <main className="collective-page">
+  if (mainView === 'collective') return <><main className="collective-page">
     <header>
       <button onClick={() => setMainView('wall')}>返回鑰匙總覽</button>
       <div><h1>尚有幾把鑰匙等待全班一起找回</h1><p>探索者們，分享你們發現的線索，一起完成最後的解謎。</p></div>
@@ -363,15 +548,16 @@ export default function App() {
       return <div className="chapter-lightbox" role="dialog" aria-modal="true" aria-label={`${chapter.id} ${chapter.keyword} 題目`} onMouseDown={(event) => event.target === event.currentTarget && setChapterPreviewId(null)}>
         <section>
           <header><strong>{chapter.id.toUpperCase()}｜{chapter.keyword}</strong><button onClick={() => setChapterPreviewId(null)} aria-label="關閉題目">關閉</button></header>
-          <img src={`${import.meta.env.BASE_URL}assets/chapters/chapter-${String(chapter.number).padStart(2, '0')}.png`} alt={`${chapter.id} ${chapter.keyword} 完整題目`} />
+          <img src={chapterImageUrls[chapter.number]} alt={`${chapter.id} ${chapter.keyword} 完整題目`} />
         </section>
       </div>
     })()}
-  </main>
+  </main>{isTestMode && <TestModeChrome compact={!!chapterPreviewId} onTools={returnToTestTools} onRestore={finishTestMode} />}</>
 
   return (
     <main className="key-wall">
       <div className="leather-frame" aria-hidden="true" />
+      {isTestMode && <TestModeChrome onTools={returnToTestTools} onRestore={finishTestMode} />}
       <header className="wall-header">
         <div className="progress-reveal">
           <div className="found-count" aria-label={`已找回 ${completed.size} 把鑰匙，共 20 把`}>
@@ -447,8 +633,34 @@ export default function App() {
 
             {step === 'librarian' && <div className="admin-mode">
               <p>LIBRARIAN ACCESS</p><h2 id="dialog-title">館員模式</h2>
+              <section className="flow-test-panel">
+                <h3>流程測試</h3>
+                <p className="test-safety-note">{isTestMode ? '目前為測試模式，不會修改正式活動進度。' : '選擇情境後將進入測試模式；正式活動進度會完整保留。'}</p>
+                <div className="test-scenario-grid">
+                  <button onClick={() => applyTestScenario('waiting')}>測試等待狀態<small>5／7組完成，部分鑰匙已找回</small></button>
+                  <button onClick={() => applyTestScenario('unresolved')}>測試未解關卡<small>7／7組完成，保留指定未解關卡</small></button>
+                  <button onClick={() => applyTestScenario('last')}>測試最後一關<small>19／20把鑰匙已找回</small></button>
+                  <button onClick={() => applyTestScenario('reveal')}>測試完整揭曉<small>20／20把鑰匙已找回</small></button>
+                  <button onClick={() => applyTestScenario('directions')}>測試關鍵力展示<small>從「看見更多」開始</small></button>
+                </div>
+                <fieldset className="test-unresolved-options">
+                  <legend>未解關卡設定</legend>
+                  <div className="test-count-options">{([1, 3, 5] as const).map((count) => <label key={count}><input type="radio" name="test-unresolved-count" checked={testUnresolvedCount === count} onChange={() => setTestUnresolvedCount(count)} />未解 {count} 關{count === 3 ? '（預設）' : ''}</label>)}</div>
+                  <div className="test-chapter-picker">{chapters.map((chapter) => <label key={chapter.id}><input type="checkbox" checked={testChapterIds.includes(chapter.id)} onChange={() => setTestChapterIds((current) => current.includes(chapter.id) ? current.filter((id) => id !== chapter.id) : [...current, chapter.id])} />{chapter.id.replace('Chapter ', '')}</label>)}</div>
+                  <small>勾選時優先使用指定 Chapter；不足時以固定關卡補足，不會隨機變動。</small>
+                </fieldset>
+                {isTestMode && <div className="test-active-actions"><strong>目前情境：{testSession?.scenario ?? '測試中'}</strong><button onClick={() => applyTestScenario(testSession?.scenario ?? 'unresolved')}>重新套用目前情境</button><button className="test-restore" onClick={finishTestMode}>結束測試並恢復</button></div>}
+              </section>
               <section><h3>七組完成進度</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
-              <section><h3>20 關答對組別／手動紀錄</h3><div className="admin-chapters">{chapters.map((chapter) => <details key={chapter.id}><summary><b>{chapter.id}｜{chapter.keyword}</b><span>{(progress.answeredGroupsByChapter[chapter.id] ?? []).length} 組</span></summary><div className="record-grid">{routes.map((route) => <label key={route.id}><input type="checkbox" checked={(progress.completedByRoute[route.id] ?? []).includes(chapter.id)} onChange={() => toggleRecord(route.id, chapter.id)} />{route.name}</label>)}</div><label className="accepted-label">可接受答案（以逗號分隔）<input value={(progress.acceptedAnswersByChapter[chapter.id] ?? []).join('，')} onChange={(event) => setAcceptedAnswers(chapter.id, event.target.value)} /></label></details>)}</div></section>
+              <section className="annual-bank-panel"><h3>年度題庫管理</h3>
+                <div className="annual-bank-toolbar"><label>目前啟用題庫<select value={bankStore.activeBankId} onChange={(event) => switchAnnualBank(event.target.value)}>{bankStore.banks.map((item) => <option key={item.id} value={item.id}>{item.academicYear}｜{item.name}{item.id === bankStore.activeBankId ? '（啟用中）' : ''}</option>)}</select></label><button disabled={!bankStore.previousActiveBankId} onClick={restorePreviousBank}>恢復上一版</button><button onClick={() => annualImportRef.current?.click()}>匯入年度題庫 ZIP</button><input ref={annualImportRef} type="file" accept=".zip,application/zip" hidden onChange={importAnnualBank} /></div>
+                <p>目前啟用：<strong>{bank.academicYear}｜{bank.name}</strong>，共 {bank.chapters.length} 關。</p>
+                <div className="annual-bank-list">{bankStore.banks.map((item) => <div key={item.id}><span>{item.academicYear}｜{item.name}</span><small>{item.id === bankStore.activeBankId ? '啟用中' : '未啟用'}</small>{item.source === 'imported' && item.id !== bankStore.activeBankId && <button onClick={() => removeAnnualBank(item.id)}>刪除此題庫</button>}</div>)}</div>
+                {bankError && <p className="annual-bank-error" role="alert">驗證失敗：{bankError}。未匯入任何資料。</p>}
+                {preparedBank && <div className="annual-bank-preview"><h4>匯入驗證通過：{preparedBank.bank.academicYear}</h4><p>20關與20張圖片完整。與目前題庫相比，共 {preparedBank.differences.length} 關有差異。</p>{preparedBank.differences.length > 0 && <ul>{preparedBank.differences.map((difference) => <li key={difference.chapterId}>{difference.chapterId}：{difference.fields.join('、')}</li>)}</ul>}<div><button onClick={activatePreparedBank}>確認匯入並啟用</button><button className="secondary-action" onClick={() => setPreparedBank(null)}>取消</button></div></div>}
+                <div className="annual-bank-chapters">{bank.chapters.map((chapter) => <details key={chapter.id}><summary><b>{chapter.id}｜{chapter.keyword}</b><span>{chapter.answer}</span></summary><div><img src={chapterImageUrls[chapter.number]} alt={`${chapter.id} ${chapter.keyword} 題目預覽`} /><p><strong>正式答案：</strong>{chapter.answer}</p><label>可接受答案<input value={chapter.acceptedAnswers.join('，')} onChange={(event) => setAcceptedAnswers(chapter.id, event.target.value)} /></label><small>{chapter.imageFile}</small></div></details>)}</div>
+              </section>
+              <section><h3>20 關答對組別／手動紀錄</h3><div className="admin-chapters">{chapters.map((chapter) => <details key={chapter.id}><summary><b>{chapter.id}｜{chapter.keyword}</b><span>{(progress.answeredGroupsByChapter[chapter.id] ?? []).length} 組</span></summary><div className="record-grid">{routes.map((route) => <label key={route.id}><input type="checkbox" checked={(progress.completedByRoute[route.id] ?? []).includes(chapter.id)} onChange={() => toggleRecord(route.id, chapter.id)} />{route.name}</label>)}</div></details>)}</div></section>
               <section className="admin-actions"><button disabled={!canStartReveal || progress.revealState === 'revealed'} onClick={startReveal}>開始揭曉</button><button onClick={exportProgress}>匯出進度 JSON</button><button onClick={() => importRef.current?.click()}>匯入進度 JSON</button><input ref={importRef} type="file" accept="application/json,.json" hidden onChange={importProgress} /><button className="danger-admin" onClick={resetAll}>重設整場活動</button><button className="secondary-action" onClick={closeDialog}>返回大屏總覽</button></section>
             </div>}
 

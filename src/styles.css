@@ -184,6 +184,49 @@ button:focus-visible, input:focus-visible { outline: 3px solid #d8ad62; outline-
 .admin-actions button { min-height: 48px; padding: 0 18px; border: 1px solid #9e7239; background: #5d3c20; color: #e5cca0; cursor: pointer; }
 .admin-actions button:disabled { opacity: .4; cursor: not-allowed; }
 .admin-actions .danger-admin { border-color: #8c554c; background: #4b2925; }
+.flow-test-panel { border-color: #8b7045 !important; background: linear-gradient(145deg, #102b34, #0a2029) !important; }
+.test-safety-note { margin: 0 0 14px; padding: 10px 14px; border-left: 3px solid #b68a4e; background: rgba(196,155,91,.08); color: #e0c89d; }
+.test-scenario-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.test-scenario-grid button, .test-active-actions button { min-height: 62px; padding: 10px 14px; border: 1px solid #8c6b3e; border-radius: 5px; background: #5b3d22; color: #ecd4a8; cursor: pointer; font-size: 16px; }
+.test-scenario-grid button small { display: block; margin-top: 5px; color: #bca98a; font-size: 12px; }
+.test-unresolved-options { margin-top: 14px; padding: 12px; border: 1px solid #4f5c59; color: #c9b58f; }
+.test-unresolved-options legend { padding: 0 8px; color: #d5b473; }
+.test-count-options { display: flex; flex-wrap: wrap; gap: 18px; }
+.test-count-options label, .test-chapter-picker label { display: flex; align-items: center; gap: 5px; }
+.test-count-options input, .test-chapter-picker input { width: 18px; height: 18px; }
+.test-chapter-picker { display: grid; grid-template-columns: repeat(10, 1fr); gap: 8px; margin: 12px 0; }
+.test-active-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.test-active-actions strong { margin-right: auto; color: #e1c17f; }
+.test-active-actions .test-restore { border-color: #956057; background: #4d2e2a; }
+.test-mode-chrome { position: fixed; z-index: 60; top: 12px; right: 14px; display: flex; align-items: center; gap: 9px; max-width: calc(100vw - 28px); padding: 8px 10px; border: 1px solid rgba(203,159,88,.7); border-radius: 5px; background: rgba(7,25,33,.94); box-shadow: 0 8px 24px rgba(0,0,0,.3); color: #d8c49f; }
+.test-mode-chrome strong { color: #e2b86f; letter-spacing: .08em; }
+.test-mode-chrome span { font-size: 13px; }
+.test-mode-chrome button { min-height: 38px; padding: 0 12px; border: 1px solid #776344; background: #17323a; color: #d7c39d; cursor: pointer; }
+.test-mode-chrome.preview-open { right: auto; left: 14px; }
+.annual-bank-panel { border-color: #806b47 !important; }
+.annual-bank-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.annual-bank-toolbar label { display: grid; flex: 1 1 360px; gap: 6px; }
+.annual-bank-toolbar select { min-height: 46px; border: 1px solid #6e5b3d; background: #071b24; color: #dfc99f; padding: 0 10px; }
+.annual-bank-toolbar button, .annual-bank-preview button { min-height: 46px; padding: 0 16px; border: 1px solid #9a733f; background: #5c3d22; color: #ead1a1; cursor: pointer; }
+.annual-bank-toolbar button:disabled { opacity: .45; cursor: not-allowed; }
+.annual-bank-error { padding: 10px 12px; border-left: 3px solid #9a554d; background: rgba(120,42,38,.2); color: #e2b0a6; }
+.annual-bank-list { display: grid; gap: 6px; margin: 10px 0; }
+.annual-bank-list > div { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid #3e5055; }
+.annual-bank-list small { color: #9d927d; }
+.annual-bank-list button { min-height: 36px; border: 1px solid #76534b; background: #412a27; color: #d8b3a8; cursor: pointer; }
+.annual-bank-preview { margin-top: 12px; padding: 14px; border: 1px solid #a17c48; background: #102c35; }
+.annual-bank-preview h4 { margin: 0 0 8px; color: #e0bd7d; }
+.annual-bank-preview ul { max-height: 150px; overflow: auto; columns: 2; }
+.annual-bank-preview > div { display: flex; gap: 10px; }
+.annual-bank-chapters { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 14px; }
+.annual-bank-chapters details { border: 1px solid #42525a; background: #0a2530; }
+.annual-bank-chapters summary { display: flex; justify-content: space-between; gap: 10px; padding: 10px 12px; color: #c8b28a; cursor: pointer; }
+.annual-bank-chapters details > div { display: grid; grid-template-columns: 120px 1fr; gap: 8px 14px; padding: 12px; border-top: 1px solid #3c4b50; }
+.annual-bank-chapters img { grid-row: 1 / span 4; width: 120px; height: 170px; object-fit: contain; background: #061820; }
+.annual-bank-chapters p { margin: 0; color: #cbb995; }
+.annual-bank-chapters label { display: grid; gap: 5px; }
+.annual-bank-chapters input { min-height: 42px; border: 1px solid #62533c; background: #061a22; color: #e1d0af; padding: 0 10px; }
+.annual-bank-chapters small { color: #8e887b; }
 .ability-content { padding: 26px; border: 1px solid #765c36; background: #091f29; }
 .ability-content strong { display: block; color: #e4bd70; font-size: 28px; }
 .ability-content p { color: #c4b494; font-size: 18px; line-height: 1.8; }
