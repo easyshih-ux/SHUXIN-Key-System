@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import direction1 from '../../assets/01_看見更多_Final.png'
-import direction2 from '../../assets/02_讀懂訊息_Final.png'
-import direction3 from '../../assets/03_認識自己_Final.png'
-import direction4 from '../../assets/04_開展可能_Final.png'
+import direction1 from '../../assets/01_看見更多_web.webp'
+import direction2 from '../../assets/02_讀懂訊息_web.webp'
+import direction3 from '../../assets/03_認識自己_web.webp'
+import direction4 from '../../assets/04_開展可能_web.webp'
 
 const directions = [
   { image: direction1, name: '看見更多', next: '下一個方向：讀懂訊息' },
