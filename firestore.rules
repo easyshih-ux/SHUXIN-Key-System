@@ -1,0 +1,44 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthorizedTeacher() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/authorizedTeachers/$(request.auth.uid));
+    }
+
+    function isValidProgress(academicYear, classId) {
+      return request.resource.data.keys().hasOnly([
+          'version', 'academicYear', 'classId', 'progress', 'mainView',
+          'collectiveChapterIds', 'revealStarted', 'revealCompleted',
+          'updatedAt', 'serverUpdatedAt'
+        ])
+        && request.resource.data.version == 1
+        && request.resource.data.academicYear == academicYear
+        && request.resource.data.classId == classId
+        && request.resource.data.progress is map
+        && request.resource.data.mainView in ['wall', 'collective', 'directions', 'abilities']
+        && request.resource.data.collectiveChapterIds is list
+        && request.resource.data.revealStarted is bool
+        && request.resource.data.revealCompleted is bool
+        && request.resource.data.updatedAt is string
+        && request.resource.data.serverUpdatedAt == request.time;
+    }
+
+    match /academicYears/{academicYear}/classes/{classId}/activityProgress/{documentId} {
+      allow read, delete: if documentId == 'current' && isAuthorizedTeacher();
+      allow create, update: if documentId == 'current'
+        && isAuthorizedTeacher()
+        && isValidProgress(academicYear, classId);
+    }
+
+    match /authorizedTeachers/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -20,6 +20,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    env:
+      VITE_FIREBASE_API_KEY: ${{ vars.SHUXIN_FIREBASE_API_KEY }}
+      VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.SHUXIN_FIREBASE_AUTH_DOMAIN }}
+      VITE_FIREBASE_PROJECT_ID: ${{ vars.SHUXIN_FIREBASE_PROJECT_ID }}
+      VITE_FIREBASE_APP_ID: ${{ vars.SHUXIN_FIREBASE_APP_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -34,6 +39,14 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Validate SHUXIN Firebase config
+        run: |
+          test -n "$VITE_FIREBASE_API_KEY"
+          test -n "$VITE_FIREBASE_AUTH_DOMAIN"
+          test -n "$VITE_FIREBASE_PROJECT_ID"
+          test "$VITE_FIREBASE_PROJECT_ID" = "shuxin-key-system"
+          test -n "$VITE_FIREBASE_APP_ID"
 
       - name: Build for GitHub Pages
         run: pnpm exec tsc -b && pnpm exec vite build --base=/SHUXIN-Key-System/

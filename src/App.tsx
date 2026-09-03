@@ -13,6 +13,9 @@ import { CapabilityDirections } from './components/CapabilityDirections'
 import { AbilitiesOverview } from './components/AbilitiesOverview'
 import { clearTestStorage, loadTestProgress, loadTestSession, saveTestProgress, saveTestSession, type TestScenario, type TestSession } from './lib/testMode'
 import { activeBank, createBuiltinBank, deleteImportedImages, loadBankStore, prepareAnnualBankZip, resolveBankImageUrl, saveBankStore, saveImportedImages, type PreparedAnnualBank } from './lib/annualBanks'
+import { loadActivityProgress, resetActivityProgress, saveActivityProgress, type ActivityProgressDocument } from './lib/activityProgress'
+import { observeTeacherAuth, signInTeacher, signOutTeacher, type TeacherAuthSnapshot } from './lib/teacherAuth'
+import { canUseCloudProgress, loadProgressWithFallback } from './lib/cloudAccess'
 
 type DialogStep = 'librarian' | 'ability'
 type ResultKind = 'first' | 'duplicate' | 'off-route' | 'wrong' | 'no-group'
@@ -69,6 +72,15 @@ export default function App() {
   const [chapterImageUrls, setChapterImageUrls] = useState<Record<number, string>>({})
   const [preparedBank, setPreparedBank] = useState<PreparedAnnualBank | null>(null)
   const [bankError, setBankError] = useState('')
+  const [classId, setClassId] = useState('')
+  const [classDraft, setClassDraft] = useState(() => localStorage.getItem('shuxin-last-class-id') ?? '701')
+  const [sessionReady, setSessionReady] = useState(false)
+  const [resumeCandidate, setResumeCandidate] = useState<ActivityProgressDocument | null>(null)
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'local' | 'error'>('idle')
+  const [teacherAuth, setTeacherAuth] = useState<TeacherAuthSnapshot>({ status: 'loading', teacher: null, error: null })
+  const [authActionPending, setAuthActionPending] = useState(false)
+  const [cloudSessionReady, setCloudSessionReady] = useState(false)
+  const [uidCopied, setUidCopied] = useState(false)
 
   const groupCounts = useMemo(() => Object.fromEntries(chapters.map((chapter) => [chapter.id, (progress.answeredGroupsByChapter[chapter.id] ?? []).length])), [progress.answeredGroupsByChapter])
   const completed = useMemo(() => new Set(chapters.filter((chapter) => hasReachedCollectedLevel(groupCounts[chapter.id])).map((chapter) => chapter.id)), [groupCounts])
@@ -81,10 +93,25 @@ export default function App() {
   const canStartReveal = allCollected || allRoutesExplored
   const revealActionLabel = allCollected ? '開始揭曉' : allRoutesExplored ? '查看未解關卡' : '等待探索完成'
 
+  useEffect(() => observeTeacherAuth((snapshot) => {
+    setTeacherAuth(snapshot)
+    if (snapshot.status !== 'authorized') setCloudSessionReady(false)
+  }), [])
   useEffect(() => {
-    if (isTestMode) saveTestProgress(progress)
-    else saveProgress(progress)
-  }, [isTestMode, progress])
+    if (isTestMode) { saveTestProgress(progress); return }
+    saveProgress(progress)
+    if (!sessionReady || !classId) return
+    const timer = window.setTimeout(async () => {
+      const updatedAt = new Date().toISOString()
+      const document: ActivityProgressDocument = { version: 1, academicYear: bank.academicYear, classId, progress: { ...progress, updatedAt }, mainView, collectiveChapterIds, revealStarted: revealAnimating || mainView === 'directions' || mainView === 'abilities' || progress.revealState === 'revealed', revealCompleted: progress.revealState === 'revealed', updatedAt }
+      localStorage.setItem(`shuxin-class-progress:${bank.academicYear}:${classId}`, JSON.stringify(document))
+      if (!canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) { setSaveStatus('local'); return }
+      setSaveStatus('saving')
+      try { await saveActivityProgress(document); setSaveStatus('saved') }
+      catch { setSaveStatus('error') }
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [isTestMode, progress, sessionReady, classId, bank.academicYear, mainView, collectiveChapterIds, revealAnimating, teacherAuth.status, cloudSessionReady])
   useEffect(() => {
     let disposed = false
     const objectUrls: string[] = []
@@ -134,6 +161,68 @@ export default function App() {
     }
   }, [])
 
+  const openClassSession = async () => {
+    const nextClassId = classDraft.trim()
+    if (!nextClassId) return
+    setSaveStatus('idle')
+    const loadLocal = () => {
+      try { return JSON.parse(localStorage.getItem(`shuxin-class-progress:${bank.academicYear}:${nextClassId}`) ?? 'null') as ActivityProgressDocument | null }
+      catch { return null }
+    }
+    const loaded = await loadProgressWithFallback(
+      canUseCloudProgress(teacherAuth.status, true, isTestMode),
+      () => loadActivityProgress(bank.academicYear, nextClassId),
+      loadLocal,
+    )
+    setCloudSessionReady(loaded.cloudLoaded)
+    if (loaded.cloudError) setSaveStatus('error')
+    setClassId(nextClassId)
+    localStorage.setItem('shuxin-last-class-id', nextClassId)
+    const existing = loaded.value
+    if (existing?.version === 1 && existing.progress && Array.isArray(existing.progress.completedChapters)) setResumeCandidate(existing)
+    else { setProgress(createInitialProgress('')); setMainView('wall'); setCollectiveChapterIds([]); setSessionReady(true) }
+  }
+
+  const continueClassSession = () => {
+    if (!resumeCandidate) return
+    const validChapterIds = new Set(chapters.map((chapter) => chapter.id))
+    const restored = { ...createInitialProgress(''), ...resumeCandidate.progress, completedByRoute: resumeCandidate.progress.completedByRoute ?? {}, answeredGroupsByChapter: resumeCandidate.progress.answeredGroupsByChapter ?? {}, acceptedAnswersByChapter: resumeCandidate.progress.acceptedAnswersByChapter ?? {}, attemptedByRoute: resumeCandidate.progress.attemptedByRoute ?? {}, attemptedInputsByRoute: resumeCandidate.progress.attemptedInputsByRoute ?? {} }
+    setProgress({ ...restored, completedChapters: restored.completedChapters.filter((id) => validChapterIds.has(id)), updatedAt: new Date().toISOString() })
+    setMainView(resumeCandidate.mainView ?? 'wall')
+    setCollectiveChapterIds((resumeCandidate.collectiveChapterIds ?? []).filter((id) => validChapterIds.has(id)))
+    setResumeCandidate(null)
+    setSessionReady(true)
+  }
+
+  const restartCandidate = async () => {
+    if (!classId || !window.confirm(`確定要清除 ${classId} 的探索進度嗎？\n此操作會清除本班目前已解鎖的鑰匙與組別進度。`)) return
+    try { if (canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) await resetActivityProgress(bank.academicYear, classId) } catch { setSaveStatus('error'); return }
+    localStorage.removeItem(`shuxin-class-progress:${bank.academicYear}:${classId}`)
+    setResumeCandidate(null); setProgress(createInitialProgress('')); setMainView('wall'); setCollectiveChapterIds([]); setSessionReady(true)
+  }
+  const loginTeacher = async () => {
+    setAuthActionPending(true)
+    try { await signInTeacher() }
+    catch (error) {
+      console.error('[SHUXIN Auth] Google sign-in failed', error)
+      const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : 'unknown'
+      setTeacherAuth({ status: 'error', teacher: null, error: import.meta.env.DEV ? `Google 登入失敗：${code}` : 'Google 登入失敗或已取消，請再試一次。' })
+    }
+    finally { setAuthActionPending(false) }
+  }
+
+  const logoutTeacher = async () => {
+    setAuthActionPending(true)
+    try { await signOutTeacher(); setCloudSessionReady(false); setSaveStatus('local') }
+    catch { setTeacherAuth((current) => ({ status: 'error', teacher: current.teacher, error: '登出失敗，請再試一次。' })) }
+    finally { setAuthActionPending(false) }
+  }
+
+  const copyTeacherUid = async () => {
+    if (!teacherAuth.teacher) return
+    try { await navigator.clipboard.writeText(teacherAuth.teacher.uid); setUidCopied(true); window.setTimeout(() => setUidCopied(false), 1600) }
+    catch { setUidCopied(false) }
+  }
   const closeDialog = () => {
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
     closeTimer.current = null
@@ -344,9 +433,11 @@ export default function App() {
     setProgress({ ...progress, completedByRoute, answeredGroupsByChapter, completedChapters, attemptedByRoute: { ...progress.attemptedByRoute, [routeId]: [] }, attemptedInputsByRoute: { ...progress.attemptedInputsByRoute, [routeId]: [] }, revealState: 'locked', updatedAt: new Date().toISOString() })
   }
 
-  const resetAll = () => {
+  const resetAll = async () => {
     if (!window.confirm('第一次確認：確定要重設整場活動嗎？')) return
     if (!window.confirm('第二次確認：所有進度、答案設定與揭曉狀態都會清除。')) return
+    try { if (classId && canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) await resetActivityProgress(bank.academicYear, classId) } catch { setSaveStatus('error'); return }
+    localStorage.removeItem(`shuxin-class-progress:${bank.academicYear}:${classId}`)
     setProgress(createInitialProgress(''))
   }
 
@@ -518,6 +609,13 @@ export default function App() {
     setAbilityChapterId(chapterId); setStep('ability')
   }
 
+  if (!sessionReady || resumeCandidate) return <main className="class-session-page"><section className="class-session-card">
+    <p>SHUXIN CLASS SESSION</p><h1>{bank.academicYear}｜班級探索進度</h1>
+    {!resumeCandidate ? <><label>班級<input value={classDraft} onChange={(event) => setClassDraft(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void openClassSession()} placeholder="例如 701" autoFocus /></label><button onClick={() => void openClassSession()}>檢查班級進度</button>{saveStatus === 'error' && <small className="save-error">無法連線 Firestore；請確認 Firebase 設定與網路連線。</small>}</> : <>
+      <div className="resume-summary"><strong>{classId} {resumeCandidate.progress.completedChapters.length >= chapters.length ? '已完成本次探索' : `上次探索進度：${resumeCandidate.progress.completedChapters.length} / ${chapters.length}`}</strong><span>最後更新：{new Date(resumeCandidate.updatedAt).toLocaleString('zh-TW')}</span></div>
+      <button onClick={continueClassSession}>{resumeCandidate.progress.completedChapters.length >= chapters.length ? '查看完成狀態' : '繼續上次進度'}</button><button className="secondary-action" onClick={() => void restartCandidate()}>重新開始</button>
+    </>}
+  </section></main>
   if (mainView === 'directions') return <><CapabilityDirections onFinish={() => setMainView('abilities')} />{isTestMode && <TestModeChrome onTools={returnToTestTools} onRestore={finishTestMode} />}</>
   if (mainView === 'abilities') return <><AbilitiesOverview onBack={() => setMainView('wall')} />{isTestMode && <TestModeChrome onTools={returnToTestTools} onRestore={finishTestMode} />}</>
 
@@ -571,8 +669,8 @@ export default function App() {
           <h1>SHUXIN</h1>
           <span>散落的鑰匙，正等待探索者將它們一一找回</span>
         </div>
-        <div className="header-actions">
-          <button className="music-toggle" aria-pressed={musicEnabled} onClick={() => { const next = !musicEnabled; audioManager.setMusicEnabled(next); setMusicEnabled(next) }}>音樂{musicEnabled ? '開' : '關'}</button>
+        <div className="header-actions"><span className={`save-indicator ${saveStatus}`}>{saveStatus === 'saving' ? '正在儲存…' : saveStatus === 'saved' ? `✓ ${classId} 雲端進度已儲存` : saveStatus === 'local' ? `${classId} 僅儲存於本機` : saveStatus === 'error' ? '雲端進度儲存失敗，本機進度仍保留' : `${bank.academicYear}｜${classId}`}</span>
+          <button className="class-switch" onClick={() => { setSessionReady(false); setClassId(''); setCloudSessionReady(false); setSaveStatus('idle') }}>切換班級</button><button className="music-toggle" aria-pressed={musicEnabled} onClick={() => { const next = !musicEnabled; audioManager.setMusicEnabled(next); setMusicEnabled(next) }}>音樂{musicEnabled ? '開' : '關'}</button>
           <button className="sound-toggle" aria-pressed={audioEnabled} onClick={() => { const next = !audioEnabled; audioManager.setEnabled(next); setAudioEnabled(next) }}>音效{audioEnabled ? '開' : '關'}</button>
           <button className="librarian-entry" onClick={() => setStep('librarian')}>館員模式</button>
         </div>
@@ -633,6 +731,16 @@ export default function App() {
 
             {step === 'librarian' && <div className="admin-mode">
               <p>LIBRARIAN ACCESS</p><h2 id="dialog-title">館員模式</h2>
+              <section className={`teacher-auth-panel auth-${teacherAuth.status}`}>
+                <h3>館員 Google 登入</h3>
+                {teacherAuth.status === 'loading' && <p>正在恢復登入狀態…</p>}
+                {teacherAuth.status === 'signed-out' && <><p>登入已授權的教師帳號，才能使用跨裝置班級進度。</p><button disabled={authActionPending} onClick={() => void loginTeacher()}>{authActionPending ? '登入中…' : '使用 Google 登入'}</button></>}
+                {teacherAuth.status === 'checking' && <p>Google 登入成功，正在確認 SHUXIN 館員權限…</p>}
+                {teacherAuth.teacher && <div className="teacher-identity">{teacherAuth.teacher.photoURL && <img src={teacherAuth.teacher.photoURL} alt="教師帳號頭像" referrerPolicy="no-referrer" />}<div><strong>{teacherAuth.teacher.displayName ?? 'Google 教師帳號'}</strong><span>{teacherAuth.teacher.email ?? '未提供電子郵件'}</span></div></div>}
+                {teacherAuth.status === 'authorized' && <><p className="auth-success">館員權限已確認。跨裝置班級進度可用。</p>{!cloudSessionReady && classId && <p className="auth-guidance">請切換並重新開啟目前班級，以安全載入雲端進度後再啟用自動儲存。</p>}<button disabled={authActionPending} onClick={() => void logoutTeacher()}>登出</button></>}
+                {teacherAuth.status === 'unauthorized' && <><p className="auth-warning">Google 登入成功，但此帳號尚未取得 SHUXIN 館員權限。</p><div className="teacher-uid"><span>UID</span><code>{teacherAuth.teacher.uid}</code><button onClick={() => void copyTeacherUid()}>{uidCopied ? '已複製' : '複製 UID'}</button></div><button disabled={authActionPending} onClick={() => void logoutTeacher()}>登出</button></>}
+                {teacherAuth.status === 'error' && <><p className="auth-warning">{teacherAuth.error}</p>{teacherAuth.teacher && <div className="teacher-uid"><span>UID</span><code>{teacherAuth.teacher.uid}</code><button onClick={() => void copyTeacherUid()}>{uidCopied ? '已複製' : '複製 UID'}</button></div>}<button disabled={authActionPending} onClick={() => teacherAuth.teacher ? void logoutTeacher() : void loginTeacher()}>{teacherAuth.teacher ? '登出' : '重新登入'}</button></>}
+              </section>
               <section className="flow-test-panel">
                 <h3>流程測試</h3>
                 <p className="test-safety-note">{isTestMode ? '目前為測試模式，不會修改正式活動進度。' : '選擇情境後將進入測試模式；正式活動進度會完整保留。'}</p>
@@ -651,7 +759,7 @@ export default function App() {
                 </fieldset>
                 {isTestMode && <div className="test-active-actions"><strong>目前情境：{testSession?.scenario ?? '測試中'}</strong><button onClick={() => applyTestScenario(testSession?.scenario ?? 'unresolved')}>重新套用目前情境</button><button className="test-restore" onClick={finishTestMode}>結束測試並恢復</button></div>}
               </section>
-              <section><h3>七組完成進度</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
+              <section className="class-progress-panel"><h3>班級探索進度</h3><div className="admin-routes"><div><strong>{classId}</strong><span>{completed.size}／{chapters.length}</span><button onClick={() => { closeDialog(); setSessionReady(false); setClassId('') }}>切換班級</button></div></div><small>{bank.academicYear}｜{saveStatus === 'saved' ? '雲端已儲存' : saveStatus === 'error' ? '雲端失敗，本機已保留' : saveStatus === 'local' ? '僅本機續存' : '目前活動'}</small></section><section><h3>七組完成進度</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
               <section className="annual-bank-panel"><h3>年度題庫管理</h3>
                 <div className="annual-bank-toolbar"><label>目前啟用題庫<select value={bankStore.activeBankId} onChange={(event) => switchAnnualBank(event.target.value)}>{bankStore.banks.map((item) => <option key={item.id} value={item.id}>{item.academicYear}｜{item.name}{item.id === bankStore.activeBankId ? '（啟用中）' : ''}</option>)}</select></label><button disabled={!bankStore.previousActiveBankId} onClick={restorePreviousBank}>恢復上一版</button><button onClick={() => annualImportRef.current?.click()}>匯入年度題庫 ZIP</button><input ref={annualImportRef} type="file" accept=".zip,application/zip" hidden onChange={importAnnualBank} /></div>
                 <p>目前啟用：<strong>{bank.academicYear}｜{bank.name}</strong>，共 {bank.chapters.length} 關。</p>
