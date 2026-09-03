@@ -294,8 +294,8 @@ button:focus-visible, input:focus-visible { outline: 3px solid #d8ad62; outline-
 .reveal-center-mark span { color: #a99c83; letter-spacing: .08em; }
 .reveal-words { width: min(100%,840px); min-height: 142px; display: grid; place-items: center; color: #f0d8a7; text-align: center; font-size: clamp(21px,1.45vw,28px); line-height: 1.5; text-shadow: 0 2px 15px #020b10; }
 .reveal-words p { grid-area: 1/1; margin: 0; opacity: 0; }
-.reveal-words p:first-child { animation: reveal-first-phrase 3.5s 24s ease both; }
-.reveal-words p:last-child { animation: reveal-second-phrase 6s 27s ease both; }
+.reveal-words p:first-child { animation: reveal-first-phrase 3.5s 13s ease both; }
+.reveal-words p:last-child { animation: reveal-second-phrase 6s 16s ease both; }
 .reveal-action-slot { min-height: 64px; display: grid; place-items: center; }
 .reveal-continue { min-width: 280px; min-height: 58px; border: 1px solid #b48646; border-radius: 6px; background: linear-gradient(#79522e,#53341e); color: #efd7a6; cursor: pointer; font-size: 19px; letter-spacing: .12em; animation: direction-fade .8s ease both; }
 @keyframes reveal-darken { from { background: rgba(3,14,20,0); } to { background: #030e14; } }

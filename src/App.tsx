@@ -541,12 +541,10 @@ export default function App() {
       return
     }
     for (let chapterNumber = 1; chapterNumber <= 20; chapterNumber += 1) {
-      const batchStart = chapterNumber <= 10 ? 3000 : 14000
-      const withinBatch = chapterNumber <= 10 ? chapterNumber - 1 : chapterNumber - 11
-      revealTimers.current.push(window.setTimeout(() => setRevealIndex(chapterNumber), batchStart + withinBatch * 450))
+      revealTimers.current.push(window.setTimeout(() => setRevealIndex(chapterNumber), 3000 + (chapterNumber - 1) * 450))
     }
-    revealTimers.current.push(window.setTimeout(() => audioManager.finishRevealMusic(), 31000))
-    revealTimers.current.push(window.setTimeout(() => setRevealReady(true), 33000))
+    revealTimers.current.push(window.setTimeout(() => audioManager.finishRevealMusic(), 20000))
+    revealTimers.current.push(window.setTimeout(() => setRevealReady(true), 22000))
   }
 
   const startReveal = () => {
