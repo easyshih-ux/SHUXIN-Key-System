@@ -91,6 +91,18 @@ export function changeSelectedRoute(progress: ProgressState, routeId: string): P
   return { ...progress, selectedRouteId: routeId, updatedAt: new Date().toISOString() }
 }
 
+export function shouldConfirmRouteSwitch(progress: ProgressState, nextRouteId: string) {
+  const currentRouteId = progress.selectedRouteId
+  return !!currentRouteId
+    && currentRouteId !== nextRouteId
+    && !(progress.submittedGroups ?? []).includes(currentRouteId)
+    && (progress.attemptedByRoute[currentRouteId] ?? []).length > 0
+}
+
+export function submitAndChangeSelectedRoute(progress: ProgressState, routeId: string) {
+  return changeSelectedRoute(submitSelectedRoute(progress), routeId)
+}
+
 export function submitSelectedRoute(progress: ProgressState): ProgressState {
   if (!progress.selectedRouteId || (progress.submittedGroups ?? []).includes(progress.selectedRouteId)) return progress
   return { ...progress, submittedGroups: [...new Set([...(progress.submittedGroups ?? []), progress.selectedRouteId])], updatedAt: new Date().toISOString() }
@@ -115,6 +127,12 @@ export function recordIncorrectRouteAnswer(progress: ProgressState, routeId: str
     attemptedInputsByRoute: { ...progress.attemptedInputsByRoute, [routeId]: [...new Set([...(progress.attemptedInputsByRoute[routeId] ?? []), normalizedInput])] },
     updatedAt: new Date().toISOString(),
   }
+}
+
+export function isRoutePerfectTransition(before: ProgressState, after: ProgressState, routeId: string, routeChapterIds: ChapterId[]) {
+  const beforeCorrect = routeChapterIds.filter((chapterId) => (before.completedByRoute[routeId] ?? []).includes(chapterId)).length
+  const afterCorrect = routeChapterIds.filter((chapterId) => (after.completedByRoute[routeId] ?? []).includes(chapterId)).length
+  return beforeCorrect === routeChapterIds.length - 1 && afterCorrect === routeChapterIds.length
 }
 
 export type RouteChapterState = 'unattempted' | 'incorrect' | 'correct'

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeAcademicYearKey, normalizeClassId, progressDocumentPath } from './activityProgress'
-import { changeSelectedRoute, createInitialProgress, getRouteChapterState, partitionRoutesBySubmission, recordCorrectRouteAnswer, recordIncorrectRouteAnswer, submitSelectedRoute, submittedGroupsWithLegacyFallback, withoutLegacyCompletedGroups } from './progress'
+import { changeSelectedRoute, createInitialProgress, getRouteChapterState, isRoutePerfectTransition, partitionRoutesBySubmission, recordCorrectRouteAnswer, recordIncorrectRouteAnswer, shouldConfirmRouteSwitch, submitAndChangeSelectedRoute, submitSelectedRoute, submittedGroupsWithLegacyFallback, withoutLegacyCompletedGroups } from './progress'
 import { getKeyLevel, hasReachedCollectedLevel } from '../config/keyLevels'
 import { routes } from '../data/routes'
 
@@ -151,5 +151,84 @@ describe('group submission is independent from answer correctness', () => {
     expect(grouped.pendingRoutes).toHaveLength(4)
     expect(grouped.submittedRoutes.map((route) => route.id)).toEqual(submitted)
     expect(new Set([...grouped.pendingRoutes, ...grouped.submittedRoutes].map((route) => route.id)).size).toBe(7)
+  })
+
+  it('triggers perfect clear only for a route-specific 4/5 to 5/5 transition', () => {
+    const route = routes[0]
+    let before = createInitialProgress(route.id)
+    route.chapters.slice(0, 4).forEach((chapterId) => { before = recordCorrectRouteAnswer(before, route.id, chapterId) })
+    expect(isRoutePerfectTransition(before, before, route.id, route.chapters)).toBe(false)
+    const after = recordCorrectRouteAnswer(before, route.id, route.chapters[4])
+    expect(isRoutePerfectTransition(before, after, route.id, route.chapters)).toBe(true)
+    expect(after.submittedGroups).toEqual([])
+    expect(isRoutePerfectTransition(after, after, route.id, route.chapters)).toBe(false)
+  })
+
+  it('does not count a shared chapter answered by another route toward perfect clear', () => {
+    const dawn = routes.find((route) => route.id === 'dawn-scroll')!
+    let before = createInitialProgress(dawn.id)
+    dawn.chapters.slice(0, 4).forEach((chapterId) => { before = recordCorrectRouteAnswer(before, dawn.id, chapterId) })
+    before = recordCorrectRouteAnswer(before, 'star-sea-scroll', dawn.chapters[4])
+    expect(isRoutePerfectTransition(before, before, dawn.id, dawn.chapters)).toBe(false)
+    const after = recordCorrectRouteAnswer(before, dawn.id, dawn.chapters[4])
+    expect(isRoutePerfectTransition(before, after, dawn.id, dawn.chapters)).toBe(true)
+  })
+
+  it('does not celebrate a partial submitted route', () => {
+    const route = routes[0]
+    let progress = createInitialProgress(route.id)
+    route.chapters.slice(0, 3).forEach((chapterId) => { progress = recordCorrectRouteAnswer(progress, route.id, chapterId) })
+    const submitted = submitSelectedRoute(progress)
+    expect(isRoutePerfectTransition(progress, submitted, route.id, route.chapters)).toBe(false)
+  })
+
+  it('only confirms switching away from an unsubmitted route with attempts', () => {
+    const empty = createInitialProgress('dawn-scroll')
+    expect(shouldConfirmRouteSwitch(empty, 'forest-scroll')).toBe(false)
+    const attempted = recordIncorrectRouteAnswer(empty, 'dawn-scroll', 'Chapter 08', 'wrong')
+    expect(shouldConfirmRouteSwitch(attempted, 'forest-scroll')).toBe(true)
+    expect(shouldConfirmRouteSwitch(attempted, 'dawn-scroll')).toBe(false)
+    expect(shouldConfirmRouteSwitch(submitSelectedRoute(attempted), 'forest-scroll')).toBe(false)
+  })
+
+  it('still confirms after five correct answers until the route is explicitly submitted', () => {
+    let perfect = createInitialProgress('dawn-scroll')
+    for (const chapter of ['Chapter 01', 'Chapter 02', 'Chapter 03', 'Chapter 04', 'Chapter 05'] as const) {
+      perfect = recordCorrectRouteAnswer(perfect, 'dawn-scroll', chapter)
+    }
+
+    expect(perfect.submittedGroups).toEqual([])
+    expect(shouldConfirmRouteSwitch(perfect, 'forest-scroll')).toBe(true)
+  })
+
+  it('complete and switch preserves the latest answers and submits exactly once', () => {
+    const attempted = recordIncorrectRouteAnswer(createInitialProgress('dawn-scroll'), 'dawn-scroll', 'Chapter 08', 'wrong')
+    const next = submitAndChangeSelectedRoute(attempted, 'forest-scroll')
+    expect(next.selectedRouteId).toBe('forest-scroll')
+    expect(next.submittedGroups).toEqual(['dawn-scroll'])
+    expect(getRouteChapterState(next, 'dawn-scroll', 'Chapter 08')).toBe('incorrect')
+  })
+
+  it('keeps the previous answer and submission when the next route is answered immediately', () => {
+    const firstAnswer = recordIncorrectRouteAnswer(createInitialProgress('dawn-scroll'), 'dawn-scroll', 'Chapter 08', 'wrong-dawn')
+    const completedAndSwitched = submitAndChangeSelectedRoute(firstAnswer, 'forest-scroll')
+    const nextAnswer = recordCorrectRouteAnswer(completedAndSwitched, 'forest-scroll', 'Chapter 17')
+    const persisted = JSON.parse(JSON.stringify(nextAnswer)) as typeof nextAnswer
+
+    expect(persisted.selectedRouteId).toBe('forest-scroll')
+    expect(persisted.submittedGroups).toEqual(['dawn-scroll'])
+    expect(getRouteChapterState(persisted, 'dawn-scroll', 'Chapter 08')).toBe('incorrect')
+    expect(persisted.attemptedInputsByRoute['dawn-scroll']).toEqual(['wrong-dawn'])
+    expect(getRouteChapterState(persisted, 'forest-scroll', 'Chapter 17')).toBe('correct')
+    expect(persisted.completedChapters).toContain('Chapter 17')
+    expect(persisted.answeredGroupsByChapter['Chapter 17']).toContain('forest-scroll')
+  })
+
+  it('switch only preserves attempts without submitting the previous route', () => {
+    const attempted = recordCorrectRouteAnswer(createInitialProgress('dawn-scroll'), 'dawn-scroll', 'Chapter 08')
+    const next = changeSelectedRoute(attempted, 'forest-scroll')
+    expect(next.selectedRouteId).toBe('forest-scroll')
+    expect(next.submittedGroups).toEqual([])
+    expect(getRouteChapterState(next, 'dawn-scroll', 'Chapter 08')).toBe('correct')
   })
 })

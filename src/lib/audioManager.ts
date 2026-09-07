@@ -5,7 +5,7 @@ import answerWrongUrl from '../../assets/audio/answer-wrong.mp3'
 import ambienceUrl from '../../assets/audio/shuxin-ambience.mp3'
 import revealMusicUrl from '../../assets/audio/shuxin-reveal.mp3'
 
-export type AudioEvent = 'keyAwakening' | 'resonanceUp' | 'stampDuplicate' | 'answerWrong'
+export type AudioEvent = 'keyAwakening' | 'resonanceUp' | 'stampDuplicate' | 'answerWrong' | 'scrollPerfect'
 
 export interface AudioSettings { enabled: boolean; volume: number }
 export interface MusicSettings { enabled: boolean }
@@ -21,6 +21,7 @@ export const AUDIO_PATHS: Record<AudioEvent, string> = {
   resonanceUp: resonanceUpUrl,
   stampDuplicate: stampDuplicateUrl,
   answerWrong: answerWrongUrl,
+  scrollPerfect: `${import.meta.env.BASE_URL}assets/sounds/scroll-perfect.mp3`,
 }
 
 const defaults: AudioSettings = { enabled: true, volume: DEFAULT_AUDIO_VOLUME }
@@ -37,6 +38,7 @@ class AudioManager {
   private musicFadeFrame: number | null = null
   private revealFadeFrame: number | null = null
   private playbackToken = 0
+  private activePlaybackResolve: (() => void) | null = null
 
   constructor() {
     if (typeof Audio === 'undefined') return
@@ -183,39 +185,51 @@ class AudioManager {
 
   stop() {
     this.playbackToken += 1
-    if (!this.active) return
-    this.active.onended = null
-    this.active.pause()
-    this.active.currentTime = 0
-    this.active = null
+    if (this.active) {
+      this.active.onended = null
+      this.active.pause()
+      this.active.currentTime = 0
+      this.active = null
+    }
+    this.activePlaybackResolve?.()
+    this.activePlaybackResolve = null
   }
 
   play(event: AudioEvent, volumeScale = 1) {
-    this.playSequence([{ event, volumeScale }])
+    return this.playSequence([{ event, volumeScale }])
   }
 
   playSequence(sequence: { event: AudioEvent; volumeScale?: number }[]) {
     this.fadeMusicTo(0.01, 300)
-    if (!this.unlocked || !this.settings.enabled) { this.restoreMusic(); return }
+    if (!this.unlocked || !this.settings.enabled) { this.restoreMusic(); return Promise.resolve() }
     this.stop()
     const token = ++this.playbackToken
-    const playNext = (index: number) => {
-      if (token !== this.playbackToken) return
-      const item = sequence[index]
-      if (!item) { this.active = null; this.restoreMusic(); return }
-      const sound = this.sounds.get(item.event)
-      if (!sound) { playNext(index + 1); return }
-      sound.volume = Math.min(1, this.settings.volume * Math.max(0, item.volumeScale ?? 1))
-      sound.currentTime = 0
-      this.active = sound
-      sound.onended = () => playNext(index + 1)
-      void sound.play().catch((error) => {
-        if (token === this.playbackToken && this.active === sound) this.active = null
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        if (this.activePlaybackResolve !== finish) return
+        this.activePlaybackResolve = null
+        this.active = null
         this.restoreMusic()
-        console.warn(`[SHUXIN audio] Playback failed for ${AUDIO_PATHS[item.event]}`, error)
-      })
-    }
-    playNext(0)
+        resolve()
+      }
+      this.activePlaybackResolve = finish
+      const playNext = (index: number) => {
+        if (token !== this.playbackToken) { finish(); return }
+        const item = sequence[index]
+        if (!item) { finish(); return }
+        const sound = this.sounds.get(item.event)
+        if (!sound) { playNext(index + 1); return }
+        sound.volume = Math.min(1, this.settings.volume * Math.max(0, item.volumeScale ?? 1))
+        sound.currentTime = 0
+        this.active = sound
+        sound.onended = () => playNext(index + 1)
+        void sound.play().catch((error) => {
+          console.warn(`[SHUXIN audio] Playback failed for ${AUDIO_PATHS[item.event]}`, error)
+          finish()
+        })
+      }
+      playNext(0)
+    })
   }
 }
 

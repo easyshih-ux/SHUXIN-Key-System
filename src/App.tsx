@@ -4,10 +4,11 @@ import { routes } from './data/routes'
 import { abilityByChapter } from './data/abilities'
 import type { Chapter, ChapterId, Route } from './data/types'
 import { getKeyLevel, hasReachedCollectedLevel } from './config/keyLevels'
-import { changeSelectedRoute, createInitialProgress, getRouteChapterState, isProgressState, loadProgress, partitionRoutesBySubmission, recordCorrectRouteAnswer, recordIncorrectRouteAnswer, saveProgress, submitSelectedRoute, submittedGroupsWithLegacyFallback, withoutLegacyCompletedGroups, type ProgressState } from './lib/progress'
+import { changeSelectedRoute, createInitialProgress, getRouteChapterState, isProgressState, isRoutePerfectTransition, loadProgress, partitionRoutesBySubmission, recordCorrectRouteAnswer, recordIncorrectRouteAnswer, saveProgress, shouldConfirmRouteSwitch, submitAndChangeSelectedRoute, submitSelectedRoute, submittedGroupsWithLegacyFallback, withoutLegacyCompletedGroups, type ProgressState } from './lib/progress'
 import { KeyImage } from './components/KeyImage'
 import { AwakeningOverlay, type AwakeningState } from './components/AwakeningOverlay'
 import { WrongAnswerOverlay } from './components/WrongAnswerOverlay'
+import { ScrollPerfectOverlay } from './components/ScrollPerfectOverlay'
 import { audioManager } from './lib/audioManager'
 import { FinalRevealOverlay } from './components/FinalRevealOverlay'
 import { CapabilityDirections } from './components/CapabilityDirections'
@@ -58,6 +59,9 @@ export default function App() {
   const [revealAnimating, setRevealAnimating] = useState(false)
   const answerRef = useRef<HTMLInputElement>(null)
   const [awakening, setAwakening] = useState<AwakeningState | null>(null)
+  const [perfectRoute, setPerfectRoute] = useState<Route | null>(null)
+  const pendingPerfectRoute = useRef<Route | null>(null)
+  const [pendingRouteSwitch, setPendingRouteSwitch] = useState<string | null>(null)
   const [highlightedChapter, setHighlightedChapter] = useState<ChapterId | null>(null)
   const [inputError, setInputError] = useState(false)
   const [dockCollapsed, setDockCollapsed] = useState(false)
@@ -341,7 +345,10 @@ export default function App() {
   }
 
   const registerChapter = (chapter: Chapter, route: Route) => {
-    updateProgress(recordCorrectRouteAnswer(latestProgressRef.current, route.id, chapter.id), true)
+    const currentProgress = latestProgressRef.current
+    const nextProgress = recordCorrectRouteAnswer(currentProgress, route.id, chapter.id)
+    if (isRoutePerfectTransition(currentProgress, nextProgress, route.id, route.chapters)) pendingPerfectRoute.current = route
+    updateProgress(nextProgress, true)
   }
 
   const recordWrongAttempt = (route: Route) => {
@@ -361,12 +368,22 @@ export default function App() {
     pendingChapterId.current = chapter.id
     setResult(null)
     setAwakening(state)
-    if (beforeCount === 0) audioManager.play('keyAwakening')
-    else audioManager.playSequence([{ event: 'keyAwakening' }, { event: 'resonanceUp' }])
+    const soundCompletion = beforeCount === 0
+      ? audioManager.play('keyAwakening')
+      : audioManager.playSequence([{ event: 'keyAwakening' }, { event: 'resonanceUp' }])
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
-    closeTimer.current = window.setTimeout(() => {
+    closeTimer.current = window.setTimeout(async () => {
       setAwakening(null)
       setAnswer('')
+      await soundCompletion
+      const perfect = pendingPerfectRoute.current
+      pendingPerfectRoute.current = null
+      if (perfect) {
+        setPerfectRoute(perfect)
+        void audioManager.play('scrollPerfect', 1)
+        closeTimer.current = window.setTimeout(() => { setPerfectRoute(null); audioManager.restoreMusic(); answerRef.current?.focus() }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 1200 : 2800)
+        return
+      }
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
         const targetChapterId = pendingChapterId.current
         const targetNumber = chapters.find((item) => item.id === targetChapterId)?.number
@@ -416,9 +433,28 @@ export default function App() {
 
   const changeRoute = (routeId: string) => {
     if (answer.trim() && !window.confirm('輸入框仍有文字，確定要切換組別嗎？')) return
-    const nextProgress = changeSelectedRoute(latestProgressRef.current, routeId)
-    updateProgress(nextProgress)
+    const currentProgress = latestProgressRef.current
+    if (shouldConfirmRouteSwitch(currentProgress, routeId)) { setPendingRouteSwitch(routeId); return }
+    updateProgress(changeSelectedRoute(currentProgress, routeId))
     setResult(null)
+    window.setTimeout(() => answerRef.current?.focus(), 0)
+  }
+
+  const completeAndSwitchRoute = () => {
+    if (pendingRouteSwitch === null) return
+    const nextProgress = submitAndChangeSelectedRoute(latestProgressRef.current, pendingRouteSwitch)
+    setPendingRouteSwitch(null)
+    setResult(null)
+    updateProgress(nextProgress, true)
+    window.setTimeout(() => answerRef.current?.focus(), 0)
+  }
+
+  const switchRouteWithoutSubmitting = () => {
+    if (pendingRouteSwitch === null) return
+    const nextProgress = changeSelectedRoute(latestProgressRef.current, pendingRouteSwitch)
+    setPendingRouteSwitch(null)
+    setResult(null)
+    updateProgress(nextProgress, true)
     window.setTimeout(() => answerRef.current?.focus(), 0)
   }
 
@@ -754,7 +790,15 @@ export default function App() {
       </aside>
 
       {awakening && <AwakeningOverlay state={awakening} />}
+      {perfectRoute && <ScrollPerfectOverlay route={perfectRoute} />}
       {result?.kind === 'wrong' && result.chapter && <WrongAnswerOverlay chapter={result.chapter} />}
+      {pendingRouteSwitch !== null && <div className="route-switch-confirm-backdrop" role="presentation">
+        <section className="route-switch-confirm" role="dialog" aria-modal="true" aria-labelledby="route-switch-title">
+          <h2 id="route-switch-title">這張卷軸尚未完成登記</h2>
+          <p>目前已有答題紀錄，是否完成本卷軸後再切換？</p>
+          <div><button onClick={completeAndSwitchRoute}>完成並切換</button><button onClick={switchRouteWithoutSubmitting}>只切換</button><button onClick={() => setPendingRouteSwitch(null)}>取消</button></div>
+        </section>
+      </div>}
       {result?.kind === 'off-route' && result.chapter && <div className="off-route-overlay" role="dialog" aria-modal="true">
         <section><p>{result.chapter.id}｜{result.chapter.keyword}</p><KeyImage level={getKeyLevel(groupCounts[result.chapter.id])} alt="對應鑰匙" /><h2>答案正確，但不在本組預定路線</h2><div><button onClick={() => { setResult(null); answerRef.current?.focus() }}>返回</button></div></section>
       </div>}
