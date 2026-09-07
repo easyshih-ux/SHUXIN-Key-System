@@ -361,7 +361,8 @@ export default function App() {
     pendingChapterId.current = chapter.id
     setResult(null)
     setAwakening(state)
-    audioManager.play(beforeCount === 0 ? 'keyAwakening' : 'resonanceUp')
+    if (beforeCount === 0) audioManager.play('keyAwakening')
+    else audioManager.playSequence([{ event: 'keyAwakening' }, { event: 'resonanceUp' }])
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => {
       setAwakening(null)
@@ -609,7 +610,8 @@ export default function App() {
     const answeredGroupsByChapter = { ...progress.answeredGroupsByChapter, [chapter.id]: [...new Set([...(progress.answeredGroupsByChapter[chapter.id] ?? []), 'whole-class'])] }
     setProgress({ ...progress, answeredGroupsByChapter, completedChapters: [...new Set([...progress.completedChapters, chapter.id])], updatedAt: new Date().toISOString() })
     setAwakening({ chapter, beforeLevel: getKeyLevel(beforeCount), afterLevel: getKeyLevel(beforeCount + 1), groupCount: beforeCount + 1 })
-    audioManager.play(beforeCount === 0 ? 'keyAwakening' : 'resonanceUp')
+    if (beforeCount === 0) audioManager.play('keyAwakening')
+    else audioManager.playSequence([{ event: 'keyAwakening' }, { event: 'resonanceUp' }])
     setCollectiveMessage('')
     if (closeTimer.current) window.clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => {

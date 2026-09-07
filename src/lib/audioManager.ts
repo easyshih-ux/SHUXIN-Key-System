@@ -191,25 +191,31 @@ class AudioManager {
   }
 
   play(event: AudioEvent, volumeScale = 1) {
+    this.playSequence([{ event, volumeScale }])
+  }
+
+  playSequence(sequence: { event: AudioEvent; volumeScale?: number }[]) {
     this.fadeMusicTo(0.01, 300)
     if (!this.unlocked || !this.settings.enabled) { this.restoreMusic(); return }
     this.stop()
-    const sound = this.sounds.get(event)
-    if (!sound) return
-    sound.volume = Math.min(1, this.settings.volume * Math.max(0, volumeScale))
-    sound.currentTime = 0
-    this.active = sound
     const token = ++this.playbackToken
-    sound.onended = () => {
+    const playNext = (index: number) => {
       if (token !== this.playbackToken) return
-      this.active = null
-      this.restoreMusic()
+      const item = sequence[index]
+      if (!item) { this.active = null; this.restoreMusic(); return }
+      const sound = this.sounds.get(item.event)
+      if (!sound) { playNext(index + 1); return }
+      sound.volume = Math.min(1, this.settings.volume * Math.max(0, item.volumeScale ?? 1))
+      sound.currentTime = 0
+      this.active = sound
+      sound.onended = () => playNext(index + 1)
+      void sound.play().catch((error) => {
+        if (token === this.playbackToken && this.active === sound) this.active = null
+        this.restoreMusic()
+        console.warn(`[SHUXIN audio] Playback failed for ${AUDIO_PATHS[item.event]}`, error)
+      })
     }
-    void sound.play().catch((error) => {
-      if (token === this.playbackToken && this.active === sound) this.active = null
-      this.restoreMusic()
-      console.warn(`[SHUXIN audio] Playback failed for ${AUDIO_PATHS[event]}`, error)
-    })
+    playNext(0)
   }
 }
 
