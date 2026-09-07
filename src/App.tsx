@@ -4,9 +4,10 @@ import { routes } from './data/routes'
 import { abilityByChapter } from './data/abilities'
 import type { Chapter, ChapterId, Route } from './data/types'
 import { getKeyLevel, hasReachedCollectedLevel } from './config/keyLevels'
-import { createInitialProgress, isProgressState, loadProgress, saveProgress, type ProgressState } from './lib/progress'
+import { changeSelectedRoute, createInitialProgress, getRouteChapterState, isProgressState, loadProgress, partitionRoutesBySubmission, recordCorrectRouteAnswer, recordIncorrectRouteAnswer, saveProgress, submitSelectedRoute, submittedGroupsWithLegacyFallback, withoutLegacyCompletedGroups, type ProgressState } from './lib/progress'
 import { KeyImage } from './components/KeyImage'
 import { AwakeningOverlay, type AwakeningState } from './components/AwakeningOverlay'
+import { WrongAnswerOverlay } from './components/WrongAnswerOverlay'
 import { audioManager } from './lib/audioManager'
 import { FinalRevealOverlay } from './components/FinalRevealOverlay'
 import { CapabilityDirections } from './components/CapabilityDirections'
@@ -16,6 +17,7 @@ import { activeBank, createBuiltinBank, deleteImportedImages, loadBankStore, pre
 import { loadActivityProgress, resetActivityProgress, saveActivityProgress, type ActivityProgressDocument } from './lib/activityProgress'
 import { observeTeacherAuth, signInTeacher, signOutTeacher, type TeacherAuthSnapshot } from './lib/teacherAuth'
 import { canUseCloudProgress, loadProgressWithFallback } from './lib/cloudAccess'
+import { canUseFullscreen, toggleFullscreen } from './lib/fullscreen'
 
 type DialogStep = 'librarian' | 'ability'
 type ResultKind = 'first' | 'duplicate' | 'off-route' | 'wrong' | 'no-group'
@@ -38,6 +40,8 @@ export default function App() {
   const [isTestMode, setIsTestMode] = useState(() => initialTestSession.current !== null)
   const [testSession, setTestSession] = useState<TestSession | null>(() => initialTestSession.current)
   const [progress, setProgress] = useState<ProgressState>(() => initialTestSession.current ? (loadTestProgress() ?? initialTestSession.current.backupProgress) : loadProgress(''))
+  const latestProgressRef = useRef(progress)
+  latestProgressRef.current = progress
   const [bankStore, setBankStore] = useState(() => loadBankStore(createBuiltinBank(defaultChapters, progress.acceptedAnswersByChapter)))
   const bank = activeBank(bankStore)
   const chapters = bank.chapters
@@ -81,35 +85,50 @@ export default function App() {
   const [authActionPending, setAuthActionPending] = useState(false)
   const [cloudSessionReady, setCloudSessionReady] = useState(false)
   const [uidCopied, setUidCopied] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(() => !!document.fullscreenElement)
+  const fullscreenAvailable = canUseFullscreen(document)
+  const immediatelyPersistedProgress = useRef<{ progress: ProgressState; mainView: MainView } | null>(null)
+  const cloudSaveQueue = useRef<Promise<void>>(Promise.resolve())
 
   const groupCounts = useMemo(() => Object.fromEntries(chapters.map((chapter) => [chapter.id, (progress.answeredGroupsByChapter[chapter.id] ?? []).length])), [progress.answeredGroupsByChapter])
   const completed = useMemo(() => new Set(chapters.filter((chapter) => hasReachedCollectedLevel(groupCounts[chapter.id])).map((chapter) => chapter.id)), [groupCounts])
   const allCollected = completed.size === chapters.length
   const selectedRoute = routes.find((route) => route.id === progress.selectedRouteId) ?? null
-  const groupCompleted = selectedRoute ? new Set(progress.completedByRoute[selectedRoute.id] ?? []) : new Set<ChapterId>()
-  const routeProgress = selectedRoute ? selectedRoute.chapters.filter((id) => groupCompleted.has(id)).length : 0
-  const exploredRoutes = routes.filter((route) => route.chapters.every((id) => (progress.attemptedByRoute[route.id] ?? []).includes(id)))
+  const routeAttemptCount = selectedRoute ? selectedRoute.chapters.filter((id) => (progress.attemptedByRoute[selectedRoute.id] ?? []).includes(id)).length : 0
+  const selectedRouteSubmitted = !!selectedRoute && (progress.submittedGroups ?? []).includes(selectedRoute.id)
+  const { pendingRoutes, submittedRoutes } = partitionRoutesBySubmission(routes, progress.submittedGroups ?? [])
+  const exploredRoutes = routes.filter((route) => (progress.submittedGroups ?? []).includes(route.id))
   const allRoutesExplored = exploredRoutes.length === routes.length
   const canStartReveal = allCollected || allRoutesExplored
   const revealActionLabel = allCollected ? '開始揭曉' : allRoutesExplored ? '查看未解關卡' : '等待探索完成'
+
+  const persistActivityProgress = async (progressValue: ProgressState) => {
+    if (!sessionReady || !classId) return
+    const updatedAt = new Date().toISOString()
+    const document: ActivityProgressDocument = { version: 1, academicYear: bank.academicYear, classId, progress: { ...withoutLegacyCompletedGroups(progressValue), updatedAt }, mainView, collectiveChapterIds, revealStarted: revealAnimating || mainView === 'directions' || mainView === 'abilities' || progressValue.revealState === 'revealed', revealCompleted: progressValue.revealState === 'revealed', updatedAt }
+    localStorage.setItem(`shuxin-class-progress:${bank.academicYear}:${classId}`, JSON.stringify(document))
+    if (!canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) { setSaveStatus('local'); return }
+    setSaveStatus('saving')
+    cloudSaveQueue.current = cloudSaveQueue.current.catch(() => undefined).then(() => saveActivityProgress(document))
+    try { await cloudSaveQueue.current; setSaveStatus('saved') }
+    catch { setSaveStatus('error') }
+  }
 
   useEffect(() => observeTeacherAuth((snapshot) => {
     setTeacherAuth(snapshot)
     if (snapshot.status !== 'authorized') setCloudSessionReady(false)
   }), [])
   useEffect(() => {
+    const syncFullscreenState = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', syncFullscreenState)
+    return () => document.removeEventListener('fullscreenchange', syncFullscreenState)
+  }, [])
+  useEffect(() => {
     if (isTestMode) { saveTestProgress(progress); return }
     saveProgress(progress)
+    if (immediatelyPersistedProgress.current?.progress === progress && immediatelyPersistedProgress.current.mainView === mainView) { immediatelyPersistedProgress.current = null; return }
     if (!sessionReady || !classId) return
-    const timer = window.setTimeout(async () => {
-      const updatedAt = new Date().toISOString()
-      const document: ActivityProgressDocument = { version: 1, academicYear: bank.academicYear, classId, progress: { ...progress, updatedAt }, mainView, collectiveChapterIds, revealStarted: revealAnimating || mainView === 'directions' || mainView === 'abilities' || progress.revealState === 'revealed', revealCompleted: progress.revealState === 'revealed', updatedAt }
-      localStorage.setItem(`shuxin-class-progress:${bank.academicYear}:${classId}`, JSON.stringify(document))
-      if (!canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) { setSaveStatus('local'); return }
-      setSaveStatus('saving')
-      try { await saveActivityProgress(document); setSaveStatus('saved') }
-      catch { setSaveStatus('error') }
-    }, 700)
+    const timer = window.setTimeout(() => void persistActivityProgress(latestProgressRef.current), 700)
     return () => window.clearTimeout(timer)
   }, [isTestMode, progress, sessionReady, classId, bank.academicYear, mainView, collectiveChapterIds, revealAnimating, teacherAuth.status, cloudSessionReady])
   useEffect(() => {
@@ -186,8 +205,8 @@ export default function App() {
   const continueClassSession = () => {
     if (!resumeCandidate) return
     const validChapterIds = new Set(chapters.map((chapter) => chapter.id))
-    const restored = { ...createInitialProgress(''), ...resumeCandidate.progress, completedByRoute: resumeCandidate.progress.completedByRoute ?? {}, answeredGroupsByChapter: resumeCandidate.progress.answeredGroupsByChapter ?? {}, acceptedAnswersByChapter: resumeCandidate.progress.acceptedAnswersByChapter ?? {}, attemptedByRoute: resumeCandidate.progress.attemptedByRoute ?? {}, attemptedInputsByRoute: resumeCandidate.progress.attemptedInputsByRoute ?? {} }
-    setProgress({ ...restored, completedChapters: restored.completedChapters.filter((id) => validChapterIds.has(id)), updatedAt: new Date().toISOString() })
+    const restored = { ...createInitialProgress(''), ...resumeCandidate.progress, completedByRoute: resumeCandidate.progress.completedByRoute ?? {}, answeredGroupsByChapter: resumeCandidate.progress.answeredGroupsByChapter ?? {}, acceptedAnswersByChapter: resumeCandidate.progress.acceptedAnswersByChapter ?? {}, attemptedByRoute: resumeCandidate.progress.attemptedByRoute ?? {}, attemptedInputsByRoute: resumeCandidate.progress.attemptedInputsByRoute ?? {}, submittedGroups: submittedGroupsWithLegacyFallback(resumeCandidate.progress) }
+    setProgress(withoutLegacyCompletedGroups({ ...restored, completedChapters: restored.completedChapters.filter((id) => validChapterIds.has(id)), updatedAt: new Date().toISOString() }))
     setMainView(resumeCandidate.mainView ?? 'wall')
     setCollectiveChapterIds((resumeCandidate.collectiveChapterIds ?? []).filter((id) => validChapterIds.has(id)))
     setResumeCandidate(null)
@@ -249,6 +268,7 @@ export default function App() {
       answeredGroupsByChapter,
       attemptedByRoute,
       attemptedInputsByRoute: Object.fromEntries(routes.slice(0, exploredCount).map((route) => [route.id, route.chapters.map((id) => `test-${id}`)])),
+      submittedGroups: routes.slice(0, exploredCount).map((route) => route.id),
       revealState: scenario === 'directions' ? 'revealed' : 'locked',
       updatedAt: new Date().toISOString(),
     }
@@ -308,34 +328,32 @@ export default function App() {
     setStep('librarian')
   }
 
+  const updateProgress = (nextProgress: ProgressState, saveImmediately = false) => {
+    latestProgressRef.current = nextProgress
+    setProgress(nextProgress)
+    if (!saveImmediately || isTestMode) return
+    immediatelyPersistedProgress.current = { progress: nextProgress, mainView }
+    void persistActivityProgress(nextProgress)
+  }
+  const handleFullscreen = async () => {
+    try { await toggleFullscreen(document) }
+    catch (error) { console.error('[SHUXIN Fullscreen] Unable to change fullscreen mode', error) }
+  }
+
   const registerChapter = (chapter: Chapter, route: Route) => {
-    const routeEntries = progress.completedByRoute[route.id] ?? []
-    const completedByRoute = { ...progress.completedByRoute, [route.id]: [...new Set([...routeEntries, chapter.id])] }
-    const completedChapters = [...new Set([...progress.completedChapters, chapter.id])]
-    const answeredGroups = progress.answeredGroupsByChapter[chapter.id] ?? []
-    const answeredGroupsByChapter = {
-      ...progress.answeredGroupsByChapter,
-      [chapter.id]: [...new Set([...answeredGroups, route.id])],
-    }
-    setProgress({
-      ...progress,
-      selectedRouteId: route.id,
-      completedByRoute,
-      completedChapters,
-      answeredGroupsByChapter,
-      attemptedByRoute: { ...progress.attemptedByRoute, [route.id]: [...new Set([...(progress.attemptedByRoute[route.id] ?? []), chapter.id])] },
-      updatedAt: new Date().toISOString(),
-    })
+    updateProgress(recordCorrectRouteAnswer(latestProgressRef.current, route.id, chapter.id), true)
   }
 
   const recordWrongAttempt = (route: Route) => {
-    const attempted = progress.attemptedByRoute[route.id] ?? []
+    const currentProgress = latestProgressRef.current
+    const attempted = currentProgress.attemptedByRoute[route.id] ?? []
     const normalizedInput = normalize(answer)
-    const attemptedInputs = progress.attemptedInputsByRoute[route.id] ?? []
-    if (!normalizedInput || attemptedInputs.includes(normalizedInput)) return
+    const attemptedInputs = currentProgress.attemptedInputsByRoute[route.id] ?? []
+    if (!normalizedInput || attemptedInputs.includes(normalizedInput)) return null
     const nextChapter = route.chapters.find((id) => !attempted.includes(id))
-    if (!nextChapter) return
-    setProgress({ ...progress, attemptedByRoute: { ...progress.attemptedByRoute, [route.id]: [...attempted, nextChapter] }, attemptedInputsByRoute: { ...progress.attemptedInputsByRoute, [route.id]: [...attemptedInputs, normalizedInput] }, updatedAt: new Date().toISOString() })
+    if (!nextChapter) return null
+    updateProgress(recordIncorrectRouteAnswer(currentProgress, route.id, nextChapter, normalizedInput), true)
+    return chapters.find((chapter) => chapter.id === nextChapter) ?? null
   }
 
   const playAwakening = (chapter: Chapter, beforeCount: number, afterCount: number) => {
@@ -359,7 +377,7 @@ export default function App() {
         window.setTimeout(() => answerRef.current?.focus(), reduced ? 60 : 500)
         pendingChapterId.current = null
       }))
-    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 350 : 2000)
+    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 900 : 4200)
   }
 
   const submitAnswer = (event: React.FormEvent) => {
@@ -368,15 +386,16 @@ export default function App() {
     if (!selectedRoute) { audioManager.restoreMusic(); setResult({ kind: 'no-group' }); return }
     const chapter = chapters.find((item) => [item.answer, ...item.acceptedAnswers].some((candidate) => normalize(candidate) === normalize(answer)))
     if (!chapter) {
-      recordWrongAttempt(selectedRoute)
+      const attemptedChapter = recordWrongAttempt(selectedRoute)
       audioManager.play('answerWrong')
-      setResult({ kind: 'wrong' })
+      setResult({ kind: 'wrong', chapter: attemptedChapter ?? undefined })
       setInputError(true)
       if (closeTimer.current) window.clearTimeout(closeTimer.current)
-      closeTimer.current = window.setTimeout(() => { setResult(null); setInputError(false); answerRef.current?.focus() }, 2000)
+      closeTimer.current = window.setTimeout(() => { setResult(null); setInputError(false); answerRef.current?.focus() }, 3200)
       return
     }
-    const registered = (progress.completedByRoute[selectedRoute.id] ?? []).includes(chapter.id)
+    const currentProgress = latestProgressRef.current
+    const registered = (currentProgress.completedByRoute[selectedRoute.id] ?? []).includes(chapter.id)
     if (registered) {
       audioManager.play('stampDuplicate')
       setResult({ kind: 'duplicate', chapter })
@@ -389,24 +408,24 @@ export default function App() {
       setResult({ kind: 'off-route', chapter })
       return
     }
-    const beforeCount = progress.answeredGroupsByChapter[chapter.id]?.length ?? 0
-    registerChapter(chapter, selectedRoute)
-    playAwakening(chapter, beforeCount, beforeCount + 1)
-  }
-
-  const registerOffRoute = () => {
-    if (!selectedRoute || !result?.chapter) return
-    const chapter = result.chapter
-    const beforeCount = progress.answeredGroupsByChapter[chapter.id]?.length ?? 0
+    const beforeCount = currentProgress.answeredGroupsByChapter[chapter.id]?.length ?? 0
     registerChapter(chapter, selectedRoute)
     playAwakening(chapter, beforeCount, beforeCount + 1)
   }
 
   const changeRoute = (routeId: string) => {
     if (answer.trim() && !window.confirm('輸入框仍有文字，確定要切換組別嗎？')) return
-    setProgress({ ...progress, selectedRouteId: routeId, updatedAt: new Date().toISOString() })
+    const nextProgress = changeSelectedRoute(latestProgressRef.current, routeId)
+    updateProgress(nextProgress)
     setResult(null)
     window.setTimeout(() => answerRef.current?.focus(), 0)
+  }
+
+  const submitCurrentRoute = () => {
+    const currentProgress = latestProgressRef.current
+    const nextProgress = submitSelectedRoute(currentProgress)
+    if (nextProgress === currentProgress) return
+    updateProgress(nextProgress, true)
   }
 
   const rebuildProgress = (completedByRoute: Record<string, ChapterId[]>) => {
@@ -430,7 +449,7 @@ export default function App() {
       answeredGroupsByChapter[chapterId] = [...new Set([...(answeredGroupsByChapter[chapterId] ?? []), id])]
     }))
     const completedChapters = chapters.filter((chapter) => (answeredGroupsByChapter[chapter.id] ?? []).length > 0).map((chapter) => chapter.id)
-    setProgress({ ...progress, completedByRoute, answeredGroupsByChapter, completedChapters, attemptedByRoute: { ...progress.attemptedByRoute, [routeId]: [] }, attemptedInputsByRoute: { ...progress.attemptedInputsByRoute, [routeId]: [] }, revealState: 'locked', updatedAt: new Date().toISOString() })
+    setProgress({ ...progress, completedByRoute, answeredGroupsByChapter, completedChapters, attemptedByRoute: { ...progress.attemptedByRoute, [routeId]: [] }, attemptedInputsByRoute: { ...progress.attemptedInputsByRoute, [routeId]: [] }, submittedGroups: (progress.submittedGroups ?? []).filter((id) => id !== routeId), revealState: 'locked', updatedAt: new Date().toISOString() })
   }
 
   const resetAll = async () => {
@@ -458,7 +477,7 @@ export default function App() {
     try {
       const data: unknown = JSON.parse(await file.text())
       if (!isProgressState(data)) throw new Error()
-      setProgress({ ...data, attemptedByRoute: data.attemptedByRoute ?? data.completedByRoute, attemptedInputsByRoute: data.attemptedInputsByRoute ?? {} })
+      setProgress(withoutLegacyCompletedGroups({ ...data, attemptedByRoute: data.attemptedByRoute ?? data.completedByRoute, attemptedInputsByRoute: data.attemptedInputsByRoute ?? {}, submittedGroups: submittedGroupsWithLegacyFallback(data) }))
     }
     catch { window.alert('無法匯入：檔案格式不正確。') }
     event.target.value = ''
@@ -599,7 +618,7 @@ export default function App() {
       const nextChapter = collectiveChapterIds.find((id) => id !== chapter.id && !hasReachedCollectedLevel(groupCounts[id]))
       setCollectiveChapterId(nextChapter ?? chapter.id)
       window.setTimeout(() => collectiveInputRef.current?.focus(), 50)
-    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 350 : 2000)
+    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 900 : 4200)
   }
 
   const openAbility = (chapterId: ChapterId) => {
@@ -659,7 +678,8 @@ export default function App() {
           <div className="found-count" aria-label={`已找回 ${completed.size} 把鑰匙，共 20 把`}>
             <span>已找回鑰匙</span><strong>{completed.size}<small>／20把</small></strong>
           </div>
-          <span>已完成探索：{exploredRoutes.length}／7組</span>
+          <span>已完成探索的組別：{exploredRoutes.length}／7組</span>
+          {exploredRoutes.length > 0 && <small className="submitted-route-names">已完成：{exploredRoutes.map((route) => route.name).join('、')}</small>}
           <button className="reveal-launch" disabled={!canStartReveal || revealAnimating} onClick={startReveal}>{revealActionLabel}</button>
           {!allCollected && !allRoutesExplored && <small>尚有 {routes.length - exploredRoutes.length} 組未完成</small>}
         </div>
@@ -668,7 +688,7 @@ export default function App() {
           <span>散落的鑰匙，正等待探索者將它們一一找回</span>
         </div>
         <div className="header-actions"><span className={`save-indicator ${saveStatus}`}>{saveStatus === 'saving' ? '正在儲存…' : saveStatus === 'saved' ? `✓ ${classId} 雲端進度已儲存` : saveStatus === 'local' ? `${classId} 僅儲存於本機` : saveStatus === 'error' ? '雲端進度儲存失敗，本機進度仍保留' : `${bank.academicYear}｜${classId}`}</span>
-          <button className="class-switch" onClick={() => { setSessionReady(false); setClassId(''); setCloudSessionReady(false); setSaveStatus('idle') }}>切換班級</button><button className="music-toggle" aria-pressed={musicEnabled} onClick={() => { const next = !musicEnabled; audioManager.setMusicEnabled(next); setMusicEnabled(next) }}>音樂{musicEnabled ? '開' : '關'}</button>
+          <button className="class-switch" onClick={() => { setSessionReady(false); setClassId(''); setCloudSessionReady(false); setSaveStatus('idle') }}>切換班級</button><button className="fullscreen-toggle" disabled={!fullscreenAvailable} aria-pressed={isFullscreen} title={fullscreenAvailable ? undefined : '此瀏覽器不支援全螢幕'} onClick={() => void handleFullscreen()}>{isFullscreen ? '退出全螢幕' : '⛶ 全螢幕'}</button><button className="music-toggle" aria-pressed={musicEnabled} onClick={() => { const next = !musicEnabled; audioManager.setMusicEnabled(next); setMusicEnabled(next) }}>音樂{musicEnabled ? '開' : '關'}</button>
           <button className="sound-toggle" aria-pressed={audioEnabled} onClick={() => { const next = !audioEnabled; audioManager.setEnabled(next); setAudioEnabled(next) }}>音效{audioEnabled ? '開' : '關'}</button>
           <button className="librarian-entry" onClick={() => setStep('librarian')}>館員模式</button>
         </div>
@@ -696,28 +716,45 @@ export default function App() {
           <label htmlFor="current-route">目前組別</label>
           <select id="current-route" disabled={!!awakening} value={selectedRoute?.id ?? ''} onChange={(event) => changeRoute(event.target.value)}>
             <option value="">請選擇組別</option>
-            {routes.map((route) => <option key={route.id} value={route.id}>{route.name}</option>)}
+            {pendingRoutes.length > 0 && <optgroup label={`尚未完成（${pendingRoutes.length}）`}>
+              {pendingRoutes.map((route) => <option key={route.id} value={route.id}>{route.name}</option>)}
+            </optgroup>}
+            {submittedRoutes.length > 0 && <optgroup label={`已完成（${submittedRoutes.length}）`}>
+              {submittedRoutes.map((route) => <option key={route.id} value={route.id}>✓ {route.name}｜已完成</option>)}
+            </optgroup>}
           </select>
-          <strong>{selectedRoute ? `目前登記：${selectedRoute.name}｜已完成 ${routeProgress}／5` : '請先選擇目前組別'}</strong>
+          <strong>{selectedRoute ? `目前登記：${selectedRoute.name}｜答案 ${routeAttemptCount}／5${selectedRouteSubmitted ? '｜已完成' : ''}` : '請先選擇目前組別'}</strong>
         </div>
         <form className="quick-answer-form" onSubmit={submitAnswer}>
           <label htmlFor="answer">謎底</label>
           <input ref={answerRef} id="answer" className={inputError ? 'answer-error' : ''} disabled={!!awakening} autoComplete="off" value={answer} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} onChange={(event) => { setAnswer(event.target.value); setInputError(false); if (result?.kind !== 'off-route') setResult(null) }} placeholder="輸入答案後按 Enter" />
           <button type={dockCollapsed ? 'button' : 'submit'} onClick={dockCollapsed ? () => setDockCollapsed(false) : undefined} disabled={!dockCollapsed && (!selectedRoute || !!awakening)}>{dockCollapsed ? '輸入謎底' : '確認謎底'}</button>
+          {!dockCollapsed && <button type="button" className="submit-scroll-button" disabled={!selectedRoute || selectedRouteSubmitted || !!awakening} onClick={submitCurrentRoute}>{selectedRouteSubmitted ? '本卷軸已完成' : '完成本卷軸'}</button>}
         </form>
         <div className={`inline-result ${result?.kind ?? ''}`} aria-live="polite">
-          {!result && <span>等待輸入謎底</span>}
+          {!result && !selectedRoute && <span>等待輸入謎底</span>}
+          {!result && selectedRoute && <div className="route-answer-status" aria-label={`${selectedRoute.name}五題答題狀態`}>
+            {selectedRoute.chapters.map((chapterId) => {
+              const state = getRouteChapterState(progress, selectedRoute.id, chapterId)
+              return <div key={chapterId} className={state}>
+                {state !== 'unattempted' ? <KeyImage level={state === 'correct' ? getKeyLevel(Math.max(1, groupCounts[chapterId])) : 0} alt={state === 'correct' ? `${chapterId} 已解鎖` : `${chapterId} 未亮鑰匙`} /> : <i aria-hidden="true" />}
+                <b>{chapterId.replace('Chapter ', '')}</b>
+                <small>{state === 'correct' ? '已解鎖' : state === 'incorrect' ? '答案錯誤' : '尚未輸入'}</small>
+              </div>
+            })}
+          </div>}
           {result?.kind === 'first' && result.chapter && <strong>{result.chapter.id}｜{result.chapter.keyword}　鑰匙已找回</strong>}
           {result?.kind === 'duplicate' && <strong className="duplicate-stamp">本組已經找回這把鑰匙</strong>}
-          {result?.kind === 'wrong' && <strong>謎底尚未產生共鳴，請再次確認</strong>}
+          {result?.kind === 'wrong' && <strong>答案錯誤</strong>}
           {result?.kind === 'no-group' && <strong>請先選擇目前組別</strong>}
-          {result?.kind === 'off-route' && <strong>等待館員確認是否登記</strong>}
+          {result?.kind === 'off-route' && <strong>此答案不屬於目前組別路線</strong>}
         </div>
       </aside>
 
       {awakening && <AwakeningOverlay state={awakening} />}
+      {result?.kind === 'wrong' && result.chapter && <WrongAnswerOverlay chapter={result.chapter} />}
       {result?.kind === 'off-route' && result.chapter && <div className="off-route-overlay" role="dialog" aria-modal="true">
-        <section><p>{result.chapter.id}｜{result.chapter.keyword}</p><KeyImage level={getKeyLevel(groupCounts[result.chapter.id])} alt="對應鑰匙" /><h2>答案正確，但不在本組預定路線</h2><div><button onClick={registerOffRoute}>仍要登記</button><button onClick={() => { setResult(null); answerRef.current?.focus() }}>返回</button></div></section>
+        <section><p>{result.chapter.id}｜{result.chapter.keyword}</p><KeyImage level={getKeyLevel(groupCounts[result.chapter.id])} alt="對應鑰匙" /><h2>答案正確，但不在本組預定路線</h2><div><button onClick={() => { setResult(null); answerRef.current?.focus() }}>返回</button></div></section>
       </div>}
 
       {revealAnimating && <FinalRevealOverlay ready={revealReady} revealIndex={revealIndex} onSkip={skipReveal} onContinue={showDirections} />}
@@ -757,7 +794,7 @@ export default function App() {
                 </fieldset>
                 {isTestMode && <div className="test-active-actions"><strong>目前情境：{testSession?.scenario ?? '測試中'}</strong><button onClick={() => applyTestScenario(testSession?.scenario ?? 'unresolved')}>重新套用目前情境</button><button className="test-restore" onClick={finishTestMode}>結束測試並恢復</button></div>}
               </section>
-              <section className="class-progress-panel"><h3>班級探索進度</h3><div className="admin-routes"><div><strong>{classId}</strong><span>{completed.size}／{chapters.length}</span><button onClick={() => { closeDialog(); setSessionReady(false); setClassId('') }}>切換班級</button></div></div><small>{bank.academicYear}｜{saveStatus === 'saved' ? '雲端已儲存' : saveStatus === 'error' ? '雲端失敗，本機已保留' : saveStatus === 'local' ? '僅本機續存' : '目前活動'}</small></section><section><h3>七組完成進度</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
+              <section className="class-progress-panel"><h3>班級探索進度</h3><div className="admin-routes"><div><strong>{classId}</strong><span>{completed.size}／{chapters.length}</span><button onClick={() => { closeDialog(); setSessionReady(false); setClassId('') }}>切換班級</button></div></div><small>{bank.academicYear}｜{saveStatus === 'saved' ? '雲端已儲存' : saveStatus === 'error' ? '雲端失敗，本機已保留' : saveStatus === 'local' ? '僅本機續存' : '目前活動'}</small></section><section><h3>七組記錄狀態</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{(progress.submittedGroups ?? []).includes(route.id) ? '已記錄' : '未記錄'}｜答對 {route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
               <section className="annual-bank-panel"><h3>年度題庫管理</h3>
                 <div className="annual-bank-toolbar"><label>目前啟用題庫<select value={bankStore.activeBankId} onChange={(event) => switchAnnualBank(event.target.value)}>{bankStore.banks.map((item) => <option key={item.id} value={item.id}>{item.academicYear}｜{item.name}{item.id === bankStore.activeBankId ? '（啟用中）' : ''}</option>)}</select></label><button disabled={!bankStore.previousActiveBankId} onClick={restorePreviousBank}>恢復上一版</button><button onClick={() => annualImportRef.current?.click()}>匯入年度題庫 ZIP</button><input ref={annualImportRef} type="file" accept=".zip,application/zip" hidden onChange={importAnnualBank} /></div>
                 <p>目前啟用：<strong>{bank.academicYear}｜{bank.name}</strong>，共 {bank.chapters.length} 關。</p>

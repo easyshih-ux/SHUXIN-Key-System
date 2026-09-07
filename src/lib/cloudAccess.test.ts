@@ -20,4 +20,18 @@ describe('Firestore failure fallback', () => {
     expect(cloud).not.toHaveBeenCalled()
     expect(result.value).toBe(local)
   })
+  it('prefers newer synchronous local progress while the latest cloud write is pending', async () => {
+    const cloud = { updatedAt: '2026-01-01T00:00:00.000Z', submittedGroups: ['dawn-scroll'] }
+    const local = { updatedAt: '2026-01-01T00:00:01.000Z', submittedGroups: ['dawn-scroll', 'forest-scroll'] }
+    const result = await loadProgressWithFallback(true, async () => cloud, () => local)
+    expect(result.value).toBe(local)
+    expect(result.cloudLoaded).toBe(true)
+  })
+
+  it('prefers cloud progress when it is at least as recent as local progress', async () => {
+    const cloud = { updatedAt: '2026-01-01T00:00:02.000Z', submittedGroups: ['dawn-scroll', 'forest-scroll'] }
+    const local = { updatedAt: '2026-01-01T00:00:01.000Z', submittedGroups: ['dawn-scroll'] }
+    const result = await loadProgressWithFallback(true, async () => cloud, () => local)
+    expect(result.value).toBe(cloud)
+  })
 })

@@ -9,6 +9,7 @@ export interface ProgressState {
   acceptedAnswersByChapter: Partial<Record<ChapterId, string[]>>
   attemptedByRoute: Record<string, ChapterId[]>
   attemptedInputsByRoute: Record<string, string[]>
+  submittedGroups: string[]
   revealState: 'locked' | 'revealed'
   updatedAt: string
 }
@@ -24,6 +25,7 @@ export const createInitialProgress = (routeId: string): ProgressState => ({
   acceptedAnswersByChapter: {},
   attemptedByRoute: {},
   attemptedInputsByRoute: {},
+  submittedGroups: [],
   revealState: 'locked',
   updatedAt: new Date().toISOString(),
 })
@@ -36,6 +38,18 @@ const invertRouteProgress = (completedByRoute: Record<string, ChapterId[]>) => {
     })
   })
   return result
+}
+
+export const submittedGroupsWithLegacyFallback = (progress: Partial<ProgressState> & { completedGroups?: unknown }) => Array.isArray(progress.submittedGroups)
+  ? progress.submittedGroups.filter((id): id is string => typeof id === 'string')
+  : Array.isArray(progress.completedGroups)
+    ? progress.completedGroups.filter((id): id is string => typeof id === 'string')
+    : Object.entries(progress.attemptedByRoute ?? {}).filter(([, chapterIds]) => Array.isArray(chapterIds) && chapterIds.length >= 5).map(([routeId]) => routeId)
+
+export const withoutLegacyCompletedGroups = (progress: ProgressState): ProgressState => {
+  const normalized = { ...progress } as ProgressState & { completedGroups?: unknown }
+  delete normalized.completedGroups
+  return normalized
 }
 
 export function loadProgress(routeId: string): ProgressState {
@@ -60,6 +74,7 @@ export function loadProgress(routeId: string): ProgressState {
       attemptedInputsByRoute: parsed.attemptedInputsByRoute && typeof parsed.attemptedInputsByRoute === 'object'
         ? parsed.attemptedInputsByRoute
         : {},
+      submittedGroups: submittedGroupsWithLegacyFallback(parsed),
       revealState: parsed.revealState === 'revealed' ? 'revealed' : 'locked',
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
     }
@@ -70,6 +85,52 @@ export function loadProgress(routeId: string): ProgressState {
 
 export function saveProgress(progress: ProgressState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(progress))
+}
+
+export function changeSelectedRoute(progress: ProgressState, routeId: string): ProgressState {
+  return { ...progress, selectedRouteId: routeId, updatedAt: new Date().toISOString() }
+}
+
+export function submitSelectedRoute(progress: ProgressState): ProgressState {
+  if (!progress.selectedRouteId || (progress.submittedGroups ?? []).includes(progress.selectedRouteId)) return progress
+  return { ...progress, submittedGroups: [...new Set([...(progress.submittedGroups ?? []), progress.selectedRouteId])], updatedAt: new Date().toISOString() }
+}
+
+export function recordCorrectRouteAnswer(progress: ProgressState, routeId: string, chapterId: ChapterId): ProgressState {
+  return {
+    ...progress,
+    selectedRouteId: routeId,
+    completedByRoute: { ...progress.completedByRoute, [routeId]: [...new Set([...(progress.completedByRoute[routeId] ?? []), chapterId])] },
+    completedChapters: [...new Set([...progress.completedChapters, chapterId])],
+    answeredGroupsByChapter: { ...progress.answeredGroupsByChapter, [chapterId]: [...new Set([...(progress.answeredGroupsByChapter[chapterId] ?? []), routeId])] },
+    attemptedByRoute: { ...progress.attemptedByRoute, [routeId]: [...new Set([...(progress.attemptedByRoute[routeId] ?? []), chapterId])] },
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+export function recordIncorrectRouteAnswer(progress: ProgressState, routeId: string, chapterId: ChapterId, normalizedInput: string): ProgressState {
+  return {
+    ...progress,
+    attemptedByRoute: { ...progress.attemptedByRoute, [routeId]: [...new Set([...(progress.attemptedByRoute[routeId] ?? []), chapterId])] },
+    attemptedInputsByRoute: { ...progress.attemptedInputsByRoute, [routeId]: [...new Set([...(progress.attemptedInputsByRoute[routeId] ?? []), normalizedInput])] },
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+export type RouteChapterState = 'unattempted' | 'incorrect' | 'correct'
+
+export function getRouteChapterState(progress: ProgressState, routeId: string, chapterId: ChapterId): RouteChapterState {
+  if ((progress.completedByRoute[routeId] ?? []).includes(chapterId)) return 'correct'
+  if ((progress.attemptedByRoute[routeId] ?? []).includes(chapterId)) return 'incorrect'
+  return 'unattempted'
+}
+
+export function partitionRoutesBySubmission<T extends { id: string }>(routeList: T[], submittedGroups: string[]) {
+  const submitted = new Set(submittedGroups)
+  return {
+    pendingRoutes: routeList.filter((route) => !submitted.has(route.id)),
+    submittedRoutes: routeList.filter((route) => submitted.has(route.id)),
+  }
 }
 
 export function isProgressState(value: unknown): value is ProgressState {
