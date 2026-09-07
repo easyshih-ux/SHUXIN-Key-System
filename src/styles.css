@@ -310,7 +310,6 @@ button:focus-visible, input:focus-visible { outline: 3px solid #d8ad62; outline-
 .chapter-lightbox img { display: block; width: 100%; height: 100%; padding: 16px; object-fit: contain; background: radial-gradient(circle at 50% 35%,rgba(204,171,111,.08),transparent 56%); }
 
 .final-reveal { position: fixed; z-index: 40; inset: 0; overflow: hidden; display: grid; place-items: center; background: #030e14; animation: reveal-darken 3s ease-out both; }
-.reveal-skip { position: absolute; z-index: 5; top: 28px; right: 34px; min-height: 42px; border: 0; border-bottom: 1px solid #665b49; background: transparent; color: #77766f; cursor: pointer; }
 .reveal-keys { position: absolute; inset: 0; opacity: .82; }
 .reveal-keys > div { position: absolute; left: var(--key-x); top: var(--key-y); width: clamp(120px,7.8vw,150px); height: clamp(145px,19vh,205px); display: grid; place-items: center; transform: translate(-50%,-50%) rotate(var(--key-r)) scale(var(--key-s)); transform-origin: center; filter: brightness(.47) saturate(.68) sepia(.12); opacity: .56; }
 .reveal-keys > div:nth-child(1)  { --key-x: 7%;  --key-y: 14%; --key-s: .96; --key-r: -4deg; }

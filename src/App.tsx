@@ -614,13 +614,6 @@ export default function App() {
     setMainView('collective')
   }
 
-  const skipReveal = () => {
-    clearRevealTimers()
-    setRevealIndex(20)
-    setRevealReady(true)
-    audioManager.finishRevealMusic()
-  }
-
   const showDirections = () => {
     clearRevealTimers()
     setRevealAnimating(false)
@@ -803,7 +796,7 @@ export default function App() {
         <section><p>{result.chapter.id}｜{result.chapter.keyword}</p><KeyImage level={getKeyLevel(groupCounts[result.chapter.id])} alt="對應鑰匙" /><h2>答案正確，但不在本組預定路線</h2><div><button onClick={() => { setResult(null); answerRef.current?.focus() }}>返回</button></div></section>
       </div>}
 
-      {revealAnimating && <FinalRevealOverlay ready={revealReady} revealIndex={revealIndex} onSkip={skipReveal} onContinue={showDirections} />}
+      {revealAnimating && <FinalRevealOverlay ready={revealReady} revealIndex={revealIndex} onContinue={showDirections} />}
 
       {step && (
         <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeDialog()}>

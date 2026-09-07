@@ -4,13 +4,11 @@ import { KeyImage } from './KeyImage'
 interface Props {
   ready: boolean
   revealIndex: number
-  onSkip: () => void
   onContinue: () => void
 }
 
-export function FinalRevealOverlay({ ready, revealIndex, onSkip, onContinue }: Props) {
+export function FinalRevealOverlay({ ready, revealIndex, onContinue }: Props) {
   return <div className="final-reveal" role="dialog" aria-modal="true" aria-label="SHUXIN正式揭曉">
-    <button className="reveal-skip" onClick={onSkip}>略過動畫</button>
     <div className="reveal-keys" aria-hidden="true">
       {chapters.map((chapter) => <div key={chapter.id} className={chapter.number <= revealIndex ? 'awake' : ''}><KeyImage level={chapter.number <= revealIndex ? 3 : 1} alt="" /></div>)}
     </div>
