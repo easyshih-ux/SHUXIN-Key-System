@@ -17,7 +17,7 @@ import { clearTestStorage, loadTestProgress, loadTestSession, saveTestProgress, 
 import { activeBank, createBuiltinBank, deleteImportedImages, loadBankStore, prepareAnnualBankZip, resolveBankImageUrl, saveBankStore, saveImportedImages, type PreparedAnnualBank } from './lib/annualBanks'
 import { loadActivityProgress, resetActivityProgress, saveActivityProgress, type ActivityProgressDocument } from './lib/activityProgress'
 import { observeTeacherAuth, signInTeacher, signOutTeacher, type TeacherAuthSnapshot } from './lib/teacherAuth'
-import { canUseCloudProgress, loadProgressWithFallback } from './lib/cloudAccess'
+import { NO_CLASS_SELECTED, canUseCloudProgress, canWriteCloudProgress, cloudClassSessionKey, confirmClassProgressReset, hasCompletedCloudReadForClass, loadProgressWithFallback } from './lib/cloudAccess'
 import { canUseFullscreen, toggleFullscreen } from './lib/fullscreen'
 
 type DialogStep = 'librarian' | 'ability'
@@ -80,8 +80,8 @@ export default function App() {
   const [chapterImageUrls, setChapterImageUrls] = useState<Record<number, string>>({})
   const [preparedBank, setPreparedBank] = useState<PreparedAnnualBank | null>(null)
   const [bankError, setBankError] = useState('')
-  const [classId, setClassId] = useState('')
-  const [classDraft, setClassDraft] = useState(() => localStorage.getItem('shuxin-last-class-id') ?? '701')
+  const [classId, setClassId] = useState(NO_CLASS_SELECTED)
+  const [classDraft, setClassDraft] = useState(NO_CLASS_SELECTED)
   const [sessionReady, setSessionReady] = useState(false)
   const [resumeCandidate, setResumeCandidate] = useState<ActivityProgressDocument | null>(null)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'local' | 'error'>('idle')
@@ -93,6 +93,10 @@ export default function App() {
   const fullscreenAvailable = canUseFullscreen(document)
   const immediatelyPersistedProgress = useRef<{ progress: ProgressState; mainView: MainView } | null>(null)
   const cloudSaveQueue = useRef<Promise<void>>(Promise.resolve())
+  const loadedCloudClassKey = useRef<string | null>(null)
+  const cloudWriteArmed = useRef(false)
+  const classLoadRequest = useRef(0)
+  const previousAuthStatus = useRef<TeacherAuthSnapshot['status']>('loading')
 
   const groupCounts = useMemo(() => Object.fromEntries(chapters.map((chapter) => [chapter.id, (progress.answeredGroupsByChapter[chapter.id] ?? []).length])), [progress.answeredGroupsByChapter])
   const completed = useMemo(() => new Set(chapters.filter((chapter) => hasReachedCollectedLevel(groupCounts[chapter.id])).map((chapter) => chapter.id)), [groupCounts])
@@ -107,11 +111,12 @@ export default function App() {
   const revealActionLabel = allCollected ? '開始揭曉' : allRoutesExplored ? '查看未解關卡' : '等待探索完成'
 
   const persistActivityProgress = async (progressValue: ProgressState) => {
-    if (!sessionReady || !classId) return
+    if (!sessionReady || !classId || !cloudWriteArmed.current) return
     const updatedAt = new Date().toISOString()
     const document: ActivityProgressDocument = { version: 1, academicYear: bank.academicYear, classId, progress: { ...withoutLegacyCompletedGroups(progressValue), updatedAt }, mainView, collectiveChapterIds, revealStarted: revealAnimating || mainView === 'directions' || mainView === 'abilities' || progressValue.revealState === 'revealed', revealCompleted: progressValue.revealState === 'revealed', updatedAt }
     localStorage.setItem(`shuxin-class-progress:${bank.academicYear}:${classId}`, JSON.stringify(document))
-    if (!canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) { setSaveStatus('local'); return }
+    const initialReadComplete = hasCompletedCloudReadForClass(bank.academicYear, classId, loadedCloudClassKey.current)
+    if (!canWriteCloudProgress(teacherAuth.status, bank.academicYear, classId, initialReadComplete && cloudSessionReady, isTestMode)) { setSaveStatus('local'); return }
     setSaveStatus('saving')
     cloudSaveQueue.current = cloudSaveQueue.current.catch(() => undefined).then(() => saveActivityProgress(document))
     try { await cloudSaveQueue.current; setSaveStatus('saved') }
@@ -119,8 +124,24 @@ export default function App() {
   }
 
   useEffect(() => observeTeacherAuth((snapshot) => {
+    if (snapshot.status === 'authorized' && previousAuthStatus.current !== 'authorized') {
+      classLoadRequest.current += 1
+      loadedCloudClassKey.current = null
+      cloudWriteArmed.current = false
+      setClassId('')
+      setClassDraft('')
+      setSessionReady(false)
+      setResumeCandidate(null)
+      setSaveStatus('idle')
+      setProgress(createInitialProgress(''))
+    }
+    previousAuthStatus.current = snapshot.status
     setTeacherAuth(snapshot)
-    if (snapshot.status !== 'authorized') setCloudSessionReady(false)
+    if (snapshot.status !== 'authorized') {
+      loadedCloudClassKey.current = null
+      cloudWriteArmed.current = false
+      setCloudSessionReady(false)
+    }
   }), [])
   useEffect(() => {
     const syncFullscreenState = () => setIsFullscreen(!!document.fullscreenElement)
@@ -184,9 +205,28 @@ export default function App() {
     }
   }, [])
 
+  const leaveClassSession = () => {
+    classLoadRequest.current += 1
+    loadedCloudClassKey.current = null
+    cloudWriteArmed.current = false
+    setCloudSessionReady(false)
+    setSessionReady(false)
+    setResumeCandidate(null)
+    setClassId('')
+    setClassDraft('')
+    setSaveStatus('idle')
+  }
+
   const openClassSession = async () => {
     const nextClassId = classDraft.trim()
     if (!nextClassId) return
+    const requestId = ++classLoadRequest.current
+    loadedCloudClassKey.current = null
+    cloudWriteArmed.current = false
+    setCloudSessionReady(false)
+    setSessionReady(false)
+    setResumeCandidate(null)
+    setClassId('')
     setSaveStatus('idle')
     const loadLocal = () => {
       try { return JSON.parse(localStorage.getItem(`shuxin-class-progress:${bank.academicYear}:${nextClassId}`) ?? 'null') as ActivityProgressDocument | null }
@@ -197,6 +237,12 @@ export default function App() {
       () => loadActivityProgress(bank.academicYear, nextClassId),
       loadLocal,
     )
+    if (requestId !== classLoadRequest.current) return
+    if (teacherAuth.status === 'authorized' && loaded.cloudError) {
+      setSaveStatus('error')
+      return
+    }
+    loadedCloudClassKey.current = loaded.cloudLoaded ? cloudClassSessionKey(bank.academicYear, nextClassId) : null
     setCloudSessionReady(loaded.cloudLoaded)
     if (loaded.cloudError) setSaveStatus('error')
     setClassId(nextClassId)
@@ -208,6 +254,7 @@ export default function App() {
 
   const continueClassSession = () => {
     if (!resumeCandidate) return
+    cloudWriteArmed.current = true
     const validChapterIds = new Set(chapters.map((chapter) => chapter.id))
     const restored = { ...createInitialProgress(''), ...resumeCandidate.progress, completedByRoute: resumeCandidate.progress.completedByRoute ?? {}, answeredGroupsByChapter: resumeCandidate.progress.answeredGroupsByChapter ?? {}, acceptedAnswersByChapter: resumeCandidate.progress.acceptedAnswersByChapter ?? {}, attemptedByRoute: resumeCandidate.progress.attemptedByRoute ?? {}, attemptedInputsByRoute: resumeCandidate.progress.attemptedInputsByRoute ?? {}, submittedGroups: submittedGroupsWithLegacyFallback(resumeCandidate.progress) }
     setProgress(withoutLegacyCompletedGroups({ ...restored, completedChapters: restored.completedChapters.filter((id) => validChapterIds.has(id)), updatedAt: new Date().toISOString() }))
@@ -218,9 +265,11 @@ export default function App() {
   }
 
   const restartCandidate = async () => {
-    if (!classId || !window.confirm(`確定要清除 ${classId} 的探索進度嗎？\n此操作會清除本班目前已解鎖的鑰匙與組別進度。`)) return
-    try { if (canUseCloudProgress(teacherAuth.status, cloudSessionReady, isTestMode)) await resetActivityProgress(bank.academicYear, classId) } catch { setSaveStatus('error'); return }
+    if (!classId || !confirmClassProgressReset(window.confirm, bank.academicYear, classId)) return
+    const initialReadComplete = hasCompletedCloudReadForClass(bank.academicYear, classId, loadedCloudClassKey.current)
+    try { if (canWriteCloudProgress(teacherAuth.status, bank.academicYear, classId, initialReadComplete && cloudSessionReady, isTestMode)) await resetActivityProgress(bank.academicYear, classId) } catch { setSaveStatus('error'); return }
     localStorage.removeItem(`shuxin-class-progress:${bank.academicYear}:${classId}`)
+    cloudWriteArmed.current = false
     setResumeCandidate(null); setProgress(createInitialProgress('')); setMainView('wall'); setCollectiveChapterIds([]); setSessionReady(true)
   }
   const loginTeacher = async () => {
@@ -333,6 +382,7 @@ export default function App() {
   }
 
   const updateProgress = (nextProgress: ProgressState, saveImmediately = false) => {
+    cloudWriteArmed.current = true
     latestProgressRef.current = nextProgress
     setProgress(nextProgress)
     if (!saveImmediately || isTestMode) return
@@ -659,7 +709,7 @@ export default function App() {
 
   if (!sessionReady || resumeCandidate) return <main className="class-session-page"><section className="class-session-card">
     <p>SHUXIN CLASS SESSION</p><h1>{bank.academicYear}｜班級探索進度</h1>
-    {!resumeCandidate ? <><label>班級<input value={classDraft} onChange={(event) => setClassDraft(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void openClassSession()} placeholder="例如 701" autoFocus /></label><button onClick={() => void openClassSession()}>檢查班級進度</button>{saveStatus === 'error' && <small className="save-error">無法連線 Firestore；請確認 Firebase 設定與網路連線。</small>}</> : <>
+    {!resumeCandidate ? <><h2>請選擇班級</h2><label>班級<input value={classDraft} onChange={(event) => setClassDraft(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void openClassSession()} placeholder="例如 701" autoFocus /></label><button onClick={() => void openClassSession()}>檢查班級進度</button>{saveStatus === 'error' && <small className="save-error">無法連線 Firestore；為保護既有進度，目前不會開啟或寫入這個班級。</small>}</> : <>
       <div className="resume-summary"><strong>{classId} {resumeCandidate.progress.completedChapters.length >= chapters.length ? '已完成本次探索' : `上次探索進度：${resumeCandidate.progress.completedChapters.length} / ${chapters.length}`}</strong><span>最後更新：{new Date(resumeCandidate.updatedAt).toLocaleString('zh-TW')}</span></div>
       <button onClick={continueClassSession}>{resumeCandidate.progress.completedChapters.length >= chapters.length ? '查看完成狀態' : '繼續上次進度'}</button><button className="secondary-action" onClick={() => void restartCandidate()}>重新開始</button>
     </>}
@@ -719,7 +769,7 @@ export default function App() {
           <span>散落的鑰匙，正等待探索者將它們一一找回</span>
         </div>
         <div className="header-actions"><span className={`save-indicator ${saveStatus}`}>{saveStatus === 'saving' ? '正在儲存…' : saveStatus === 'saved' ? `✓ ${classId} 雲端進度已儲存` : saveStatus === 'local' ? `${classId} 僅儲存於本機` : saveStatus === 'error' ? '雲端進度儲存失敗，本機進度仍保留' : `${bank.academicYear}｜${classId}`}</span>
-          <button className="class-switch" onClick={() => { setSessionReady(false); setClassId(''); setCloudSessionReady(false); setSaveStatus('idle') }}>切換班級</button><button className="fullscreen-toggle" disabled={!fullscreenAvailable} aria-pressed={isFullscreen} title={fullscreenAvailable ? undefined : '此瀏覽器不支援全螢幕'} onClick={() => void handleFullscreen()}>{isFullscreen ? '退出全螢幕' : '⛶ 全螢幕'}</button><button className="music-toggle" aria-pressed={musicEnabled} onClick={() => { const next = !musicEnabled; audioManager.setMusicEnabled(next); setMusicEnabled(next) }}>音樂{musicEnabled ? '開' : '關'}</button>
+          <button className="class-switch" onClick={leaveClassSession}>切換班級</button><button className="fullscreen-toggle" disabled={!fullscreenAvailable} aria-pressed={isFullscreen} title={fullscreenAvailable ? undefined : '此瀏覽器不支援全螢幕'} onClick={() => void handleFullscreen()}>{isFullscreen ? '退出全螢幕' : '⛶ 全螢幕'}</button><button className="music-toggle" aria-pressed={musicEnabled} onClick={() => { const next = !musicEnabled; audioManager.setMusicEnabled(next); setMusicEnabled(next) }}>音樂{musicEnabled ? '開' : '關'}</button>
           <button className="sound-toggle" aria-pressed={audioEnabled} onClick={() => { const next = !audioEnabled; audioManager.setEnabled(next); setAudioEnabled(next) }}>音效{audioEnabled ? '開' : '關'}</button>
           <button className="librarian-entry" onClick={() => setStep('librarian')}>館員模式</button>
         </div>
@@ -833,7 +883,7 @@ export default function App() {
                 </fieldset>
                 {isTestMode && <div className="test-active-actions"><strong>目前情境：{testSession?.scenario ?? '測試中'}</strong><button onClick={() => applyTestScenario(testSession?.scenario ?? 'unresolved')}>重新套用目前情境</button><button className="test-restore" onClick={finishTestMode}>結束測試並恢復</button></div>}
               </section>
-              <section className="class-progress-panel"><h3>班級探索進度</h3><div className="admin-routes"><div><strong>{classId}</strong><span>{completed.size}／{chapters.length}</span><button onClick={() => { closeDialog(); setSessionReady(false); setClassId('') }}>切換班級</button></div></div><small>{bank.academicYear}｜{saveStatus === 'saved' ? '雲端已儲存' : saveStatus === 'error' ? '雲端失敗，本機已保留' : saveStatus === 'local' ? '僅本機續存' : '目前活動'}</small></section><section><h3>七組記錄狀態</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{(progress.submittedGroups ?? []).includes(route.id) ? '已記錄' : '未記錄'}｜答對 {route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
+              <section className="class-progress-panel"><h3>班級探索進度</h3><div className="admin-routes"><div><strong>{classId}</strong><span>{completed.size}／{chapters.length}</span><button onClick={() => { closeDialog(); leaveClassSession() }}>切換班級</button></div></div><small>{bank.academicYear}｜{saveStatus === 'saved' ? '雲端已儲存' : saveStatus === 'error' ? '雲端失敗，本機已保留' : saveStatus === 'local' ? '僅本機續存' : '目前活動'}</small></section><section><h3>七組記錄狀態</h3><div className="admin-routes">{routes.map((route) => <div key={route.id}><strong>{route.name}</strong><span>{(progress.submittedGroups ?? []).includes(route.id) ? '已記錄' : '未記錄'}｜答對 {route.chapters.filter((id) => (progress.completedByRoute[route.id] ?? []).includes(id)).length}／5</span><button onClick={() => resetRoute(route.id)}>重設此組</button></div>)}</div></section>
               <section className="annual-bank-panel"><h3>年度題庫管理</h3>
                 <div className="annual-bank-toolbar"><label>目前啟用題庫<select value={bankStore.activeBankId} onChange={(event) => switchAnnualBank(event.target.value)}>{bankStore.banks.map((item) => <option key={item.id} value={item.id}>{item.academicYear}｜{item.name}{item.id === bankStore.activeBankId ? '（啟用中）' : ''}</option>)}</select></label><button disabled={!bankStore.previousActiveBankId} onClick={restorePreviousBank}>恢復上一版</button><button onClick={() => annualImportRef.current?.click()}>匯入年度題庫 ZIP</button><input ref={annualImportRef} type="file" accept=".zip,application/zip" hidden onChange={importAnnualBank} /></div>
                 <p>目前啟用：<strong>{bank.academicYear}｜{bank.name}</strong>，共 {bank.chapters.length} 關。</p>
